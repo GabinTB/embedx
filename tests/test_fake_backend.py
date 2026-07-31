@@ -33,17 +33,43 @@ def test_distinct_texts_give_distinct_vectors() -> None:
     assert not np.array_equal(out[1], out[2])
 
 
-def test_latency_honored() -> None:
-    backend = FakeBackend(dim=4, latency_s=0.01)
+def _timed(backend: FakeBackend, texts: list[str]) -> float:
     start = time.perf_counter()
-    backend.embed(["a", "b", "c", "d", "e"])
-    elapsed = time.perf_counter() - start
+    backend.embed(texts)
+    return time.perf_counter() - start
+
+
+def test_constant_latency_honored() -> None:
+    # sleep() guarantees at least the requested duration, so the lower
+    # bound is exact and load-independent: 5 items x 0.01s >= 0.05s.
+    elapsed = _timed(FakeBackend(dim=4, latency_s=0.01), ["a", "b", "c", "d", "e"])
     assert elapsed >= 0.05
 
 
-def test_zero_latency_is_fast() -> None:
-    backend = FakeBackend(dim=4)
-    start = time.perf_counter()
-    backend.embed(["a"] * 100)
-    elapsed = time.perf_counter() - start
-    assert elapsed < 1.0
+def test_per_token_latency_scales_with_length() -> None:
+    backend = FakeBackend(dim=4, latency_per_token=0.001)
+    short = _timed(backend, ["a" * 10])  # >= 0.01s
+    long = _timed(backend, ["a" * 100])  # >= 0.10s
+    assert short >= 0.01
+    assert long >= 0.10
+    # 10x the length must cost measurably more (loose ordering, not a ratio,
+    # to stay robust on loaded runners).
+    assert long > short
+
+
+def test_constant_and_per_token_latencies_are_additive() -> None:
+    # Per item: 0.02 + 0.001 * 30 = 0.05s; 3 items >= 0.15s. Either
+    # component alone would only guarantee 0.06s / 0.09s, so this lower
+    # bound is only reachable if both are applied.
+    backend = FakeBackend(dim=4, latency_s=0.02, latency_per_token=0.001)
+    elapsed = _timed(backend, ["a" * 30] * 3)
+    assert elapsed >= 0.15
+
+
+def test_default_latencies_are_fast() -> None:
+    # The zero-latency path (both defaults 0.0) must be at least an order
+    # of magnitude faster for 100 items than a single item with a real
+    # latency — i.e. hashing dominates nothing.
+    default_elapsed = _timed(FakeBackend(dim=4), ["a"] * 100)
+    latency_elapsed = _timed(FakeBackend(dim=4, latency_s=0.25), ["a"])
+    assert default_elapsed * 10 < latency_elapsed
