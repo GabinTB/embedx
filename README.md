@@ -51,13 +51,14 @@ There is also a TEI-style `POST /embed` (bare vectors), `GET /health`, and
 ## Measured results
 
 **Padding waste** (from [`dev/02_padding_savings.ipynb`](dev/02_padding_savings.ipynb),
-seeded log-normal corpus, waste = padded − real tokens as a fraction of
-padded): fixed item-count batching in arrival order wastes **64.7%** of
-compute at batch size 8, **78.8%** at 32, **84.5%** at 128. Length-sorted
-token-budget batching wastes **1.0%** at a 1,024-token budget, **15.3%** at
-16,384, **38.6%** at 65,536. The degenerate case is the argument in one line:
-one 2,000-char document in a fixed batch of 32 short texts wastes **96.4%**
-of the batch; length-sorted batching isolates it and wastes **0%**.
+`fancyzhx/ag_news` train[:2000] tokenized with MiniLM — 112,980 real tokens,
+median 53, p95 102 — waste = padded − real tokens as a fraction of padded):
+fixed item-count batching in arrival order wastes **38.0%** of compute at
+batch size 8, **54.8%** at 32, **67.5%** at 128. Length-sorted token-budget
+batching wastes **1.0%** at a 1,024-token budget, **13.3%** at 16,384,
+**35.9%** at 65,536. The degenerate case is the argument in one line: one
+2,000-char document in a fixed batch of 32 short texts wastes **96.4%** of
+the batch; length-sorted batching isolates it and wastes **0%**.
 
 **Scheduling balance** (simulation, [`dev/01_scheduling_visualization.ipynb`](dev/01_scheduling_visualization.ipynb),
 real `Scheduler` + the length-sensitive fake cost model): with a 3× speed
@@ -65,12 +66,32 @@ gap, the fast worker takes **78.6%** of tokens and both workers finish within
 **0.8%** of each other; across 1×–10× speed ratios the fast worker's item
 share adapts from 0.21 to 0.72 with zero configuration.
 
-**Two-GPU throughput on real hardware** — the four-way comparison (single
-fast GPU, static 50/50, weighted static split, converging queue) on an
-RTX PRO 2000 (Blackwell, 16 GB) + RTX A400 (4 GB, PCIe 3.0 x4) lives in
-[`dev/03_real_gpu_throughput.ipynb`](dev/03_real_gpu_throughput.ipynb). Its
-numbers appear here once the notebook has been executed on that host and
-committed with outputs; no throughput claims are made until then.
+**Two-GPU throughput on real hardware** (from
+[`dev/03_real_gpu_throughput.ipynb`](dev/03_real_gpu_throughput.ipynb), raw
+values in [`dev/output/results.json`](dev/output/results.json)): RTX PRO 2000
+(Blackwell, 16 GB, cc 12.0) + RTX A400 (4 GB, PCIe 3.0 x4, cc 8.6), driver
+610.43.02, torch 2.13.0+cu130. 8,000 ag_news texts / 442,423 tokens through
+MiniLM-L6-v2, mean pooling, bfloat16, `max_batch_tokens=16384`; medians of 5
+runs after 2 discarded warmups, correctness asserted before any timing.
+
+| configuration | makespan | throughput | idle (dev0 / dev1) |
+|---|---|---|---|
+| fast GPU alone | 1.085 s | 407,815 tok/s | 0.001 s / — |
+| static 50/50 by tokens | 1.614 s | 274,098 tok/s | 0.984 s / 0.000 s |
+| static weighted | 1.039 s | 425,939 tok/s | 0.001 s / 0.667 s |
+| **converging queue** | **0.949 s** | **466,118 tok/s** | 0.003 s / 0.007 s |
+
+The converging queue is **1.14x** the single fast GPU and **1.09x** a tuned
+weighted static split. That margin is modest and the reason is structural:
+these two cards differ by roughly 11:1, so a second GPU of that size cannot
+buy much. What the numbers do show is balance. `device_weights` allot the
+A400 8.1% of the work; allowed to pull, it took **21.5%** — which is why the
+weighted split leaves it idle for 0.667 s, 64% of its own makespan, while the
+converging queue idles both devices for under 8 ms. Splitting evenly is worse
+than ignoring the second GPU entirely: **1.49x slower** than one card alone.
+Measured H2D bandwidth differs by 2.25x (6.4 vs 2.8 GiB/s) against a
+configured weight ratio of 11.3x, and the queue is indifferent to that
+miscalibration — which is the tuning burden it exists to remove.
 
 ## Configuration
 
