@@ -39,15 +39,17 @@ def make_engine(backends: list, **settings_overrides: object) -> Engine:
 
 
 class RecordingBackend:
-    """Counts items; delegates to an inner FakeBackend."""
+    """Counts items and batches; delegates to an inner FakeBackend."""
 
     def __init__(self, inner: FakeBackend) -> None:
         self.inner = inner
         self.dim = inner.dim
         self.items = 0
+        self.batches = 0
 
     def embed(self, texts: list[str]) -> np.ndarray:
         self.items += len(texts)
+        self.batches += 1
         return self.inner.embed(texts)
 
 
@@ -215,6 +217,16 @@ def test_empty_input_returns_empty_array_and_starts_no_threads(
     out = engine.embed([])
     assert out.shape[0] == 0
     assert out.dtype == np.float32
+
+
+def test_engine_uses_injected_length_fn() -> None:
+    # Every text measures far over any budget, so each must form a batch of
+    # one — proof the scheduler is packing with the injected length, not len.
+    backend = RecordingBackend(FakeBackend(dim=4))
+    engine = Engine([backend], [make_device(0)], make_settings(), length_fn=lambda _text: 10**9)
+    out = engine.embed(["a", "b", "c"])
+    assert out.shape == (3, 4)
+    assert backend.batches == 3
 
 
 def test_constructor_validation() -> None:

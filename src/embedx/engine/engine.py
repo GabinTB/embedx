@@ -12,7 +12,7 @@ construction rather than by discipline.
 from __future__ import annotations
 
 import threading
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 
 import numpy as np
 
@@ -36,6 +36,7 @@ class Engine:
         backends: Sequence[EmbeddingBackend],
         devices: Sequence[DeviceInfo],
         settings: Settings,
+        length_fn: Callable[[str], int] = len,
     ) -> None:
         if not backends:
             raise ValueError("Engine requires at least one backend")
@@ -51,6 +52,10 @@ class Engine:
         self._budgets = [budgets[device.index] for device in self._devices]
         self._sides = assign_sides(len(self._backends))
         self._max_items = settings.max_batch_items
+        # Budgets are named in tokens, so the scheduler must measure inputs
+        # in the same unit. The factory injects the tokenizer-based length;
+        # the default `len` (characters) is for CPU tests and fakes.
+        self._length_fn = length_fn
         # One lock per backend, held across backend.embed: FastAPI calls
         # `embed` concurrently, and one CUDA device cannot run two batches
         # at once without doubling its activation memory. Serialising per
@@ -68,7 +73,7 @@ class Engine:
         if not texts:
             return np.empty((0, 0), dtype=np.float32)
 
-        scheduler = Scheduler(enumerate(texts))
+        scheduler = Scheduler(enumerate(texts), length_fn=self._length_fn)
         results: list[list[tuple[list[int], np.ndarray]]] = [[] for _ in self._backends]
         failures: list[Exception | None] = [None] * len(self._backends)
 

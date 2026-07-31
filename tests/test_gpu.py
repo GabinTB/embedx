@@ -140,6 +140,16 @@ def _fake_props(name: str, memory: int, sms: int, major: int, minor: int) -> Sim
     )
 
 
+def test_build_engine_without_cuda_raises_clearly(monkeypatch: pytest.MonkeyPatch) -> None:
+    from embedx.backend.factory import build_engine
+    from embedx.config import Settings
+
+    monkeypatch.setattr(discovery, "_import_torch", lambda: None)
+    settings = Settings(model_id="m", pooling="mean")  # type: ignore[call-arg]
+    with pytest.raises(RuntimeError, match="no CUDA device"):
+        build_engine(settings)
+
+
 def test_discover_without_torch_returns_empty(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(discovery, "_import_torch", lambda: None)
     assert discover_devices() == []
@@ -181,13 +191,24 @@ def test_discover_against_fake_torch(monkeypatch: pytest.MonkeyPatch) -> None:
 # --------------------------------------------------------------------------- #
 
 
+def _is_type_checking_test(test: ast.expr) -> bool:
+    return (isinstance(test, ast.Name) and test.id == "TYPE_CHECKING") or (
+        isinstance(test, ast.Attribute) and test.attr == "TYPE_CHECKING"
+    )
+
+
 def _module_scope_nodes(tree: ast.Module) -> Iterator[ast.AST]:
     """Every node at module scope, descending into try/if/with blocks but
-    never into function bodies (imports there are lazy by definition)."""
+    never into function bodies (imports there are lazy by definition) and
+    never into `if TYPE_CHECKING:` bodies (annotation-only, never executed
+    at runtime — the sanctioned home for torch types in annotations)."""
     stack: list[ast.AST] = list(tree.body)
     while stack:
         node = stack.pop()
         if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+            continue
+        if isinstance(node, ast.If) and _is_type_checking_test(node.test):
+            stack.extend(node.orelse)  # the else branch does execute
             continue
         yield node
         stack.extend(ast.iter_child_nodes(node))
