@@ -26,8 +26,13 @@ def build_engine(settings: Settings) -> Engine:
         )
     ranked = rank_devices(infos, settings.device_weights)
 
-    from embedx.backend.hf import HFBackend  # lazy: pulls in torch
+    from embedx.backend.hf import HFBackend, TokenLengthCache  # lazy: pulls in torch
 
+    # One cache for all devices: the engine batches with
+    # backends[0].length_fn, so a per-backend cache would leave every other
+    # device cold and re-tokenizing whole batches in _count_truncations.
+    # Same model, same tokenizer — entries are valid everywhere.
+    length_cache = TokenLengthCache()
     backends = [
         HFBackend(
             model_id=settings.model_id,
@@ -37,6 +42,7 @@ def build_engine(settings: Settings) -> Engine:
             dtype=settings.dtype,
             max_seq_length=settings.max_seq_len,
             revision=settings.revision,
+            length_cache=length_cache,
         )
         for device in ranked
     ]

@@ -71,6 +71,37 @@ def _resolve_dtype(dtype: Dtype, capability_major: int, torch_mod: Any) -> Any:
     return torch_mod.float32
 
 
+class TokenLengthCache:
+    """text -> unclamped token length, shared by every device's backend.
+
+    The keys are RAW INPUT TEXT, so the bound is a retention decision as
+    much as a memory one: a long-lived server must not accumulate unbounded
+    user input. Eviction is a full clear — crude on purpose, because
+    repeats matter within a request, not across the process lifetime — and
+    triggers on whichever cap is hit first: entry count, or total key bytes
+    (65536 document-length entries would retain gigabytes).
+    """
+
+    def __init__(self, max_entries: int = 65536, max_bytes: int = 16_000_000) -> None:
+        self.max_entries = max_entries
+        self.max_bytes = max_bytes
+        self._entries: dict[str, int] = {}
+        self._key_bytes = 0
+
+    def get(self, text: str) -> int | None:
+        return self._entries.get(text)
+
+    def put(self, text: str, length: int) -> None:
+        if text in self._entries:
+            return
+        size = len(text.encode("utf-8"))
+        if len(self._entries) >= self.max_entries or self._key_bytes + size > self.max_bytes:
+            self._entries.clear()
+            self._key_bytes = 0
+        self._entries[text] = length
+        self._key_bytes += size
+
+
 def _declared_st_pooling(module: Any) -> Pooling | None:
     """Map a sentence-transformers Pooling module's flags to our enum."""
     if getattr(module, "pooling_mode_mean_tokens", False):
@@ -99,6 +130,7 @@ class HFBackend:
         dtype: Dtype,
         max_seq_length: int | None,
         revision: str | None = None,
+        length_cache: TokenLengthCache | None = None,
     ) -> None:
         torch_mod = _import_torch()
         self._torch = torch_mod
@@ -110,7 +142,9 @@ class HFBackend:
         self.truncated_count = 0
         self.dim: int = 0
         self.max_seq_length: int = 0
-        self._length_cache: dict[str, int] = {}
+        # The factory passes one cache shared by all devices (see
+        # build_engine); a private instance keeps direct construction working.
+        self._length_cache = length_cache if length_cache is not None else TokenLengthCache()
         self._tokenizer: Any = None
         self._st_model: Any = None
         self._model: Any = None
@@ -277,20 +311,19 @@ class HFBackend:
     # ------------------------------------------------------------------ #
 
     def _raw_token_length(self, text: str) -> int:
-        """Unclamped token length, cached.
+        """Unclamped token length via the engine-wide shared cache.
 
-        The cache is what keeps each text to ONE tokenization per request
-        across `length_fn` (the batcher) and `_count_truncations` (embed).
-        The bound is crude — full clear at capacity — because repeats
-        matter within a request, not across the process lifetime.
+        The shared cache is what keeps each text to ONE tokenization per
+        request: the batcher calls `backends[0].length_fn`, and every other
+        device's `_count_truncations` then reads the same entries instead
+        of re-tokenizing the batch cold. All backends serve the same model
+        with the same tokenizer, so entries are valid for all of them.
         """
         cached = self._length_cache.get(text)
         if cached is not None:
             return cached
         length = len(self._tokenizer(text, truncation=False, padding=False)["input_ids"])
-        if len(self._length_cache) >= 65536:
-            self._length_cache.clear()
-        self._length_cache[text] = length
+        self._length_cache.put(text, length)
         return length
 
     def length_fn(self, text: str) -> int:
