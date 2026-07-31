@@ -78,6 +78,7 @@ packages = ["src/embedx"]
 include = [
     "src",
     "tests",
+    "CHANGELOG.md",
     "DEPLOY.md",
     "README.md",
     "LICENSE",

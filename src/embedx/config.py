@@ -122,28 +122,61 @@ class Settings(BaseSettings):
         extra="forbid",
     )
 
-    # Model
-    model_id: str = Field(min_length=1)
-    revision: str | None = None
-    pooling: Pooling
-    normalize: bool = True
-    dtype: Dtype = Dtype.AUTO
-    max_seq_len: int | None = Field(default=None, gt=0)
+    # Model. Field descriptions are user-facing: the README config table is
+    # rendered from them (tests/test_readme.py keeps it in sync).
+    model_id: str = Field(min_length=1, description="Hugging Face model id or local path.")
+    revision: str | None = Field(
+        default=None, description="Model revision: branch, tag, or commit."
+    )
+    pooling: Pooling = Field(
+        description="Pooling strategy. Required on purpose: a wrong pooling produces "
+        "plausible garbage vectors, so it is never inferred."
+    )
+    normalize: bool = Field(default=True, description="L2-normalize embeddings after pooling.")
+    dtype: Dtype = Field(
+        default=Dtype.AUTO,
+        description="Compute dtype; auto resolves by device capability (bf16/fp16/fp32).",
+    )
+    max_seq_len: int | None = Field(
+        default=None,
+        gt=0,
+        description="Max sequence length in tokens; longer inputs are truncated and counted.",
+    )
 
     # Server
-    host: str = "127.0.0.1"
-    port: int = Field(default=8477, ge=1024, le=65535)
-    api_key: str | None = None
-    max_request_items: int = Field(default=2048, gt=0)
-    max_request_bytes: int = Field(default=32_000_000, gt=0)
-    log_level: str = "INFO"
+    host: str = Field(default="127.0.0.1", description="Bind address; loopback by default.")
+    port: int = Field(default=8477, ge=1024, le=65535, description="Bind port (1024-65535).")
+    api_key: str | None = Field(
+        default=None, description="Bearer API key; unset disables auth entirely."
+    )
+    max_request_items: int = Field(
+        default=2048, gt=0, description="Maximum number of inputs per request."
+    )
+    max_request_bytes: int = Field(
+        default=32_000_000, gt=0, description="Maximum request body size in bytes."
+    )
+    log_level: str = Field(
+        default="INFO", description="Log level: DEBUG, INFO, WARNING, ERROR, or CRITICAL."
+    )
 
     # Devices and batching
-    devices: Annotated[list[int] | None, NoDecode] = None
-    max_batch_tokens: int = Field(default=16384, gt=0)
-    max_batch_items: int | None = Field(default=None, gt=0)
-    device_weights: Annotated[dict[int, float], NoDecode] = Field(default_factory=dict)
-    device_batch_tokens: Annotated[dict[int, int], NoDecode] = Field(default_factory=dict)
+    devices: Annotated[list[int] | None, NoDecode] = Field(
+        default=None, description='CUDA device indices (list or "0,1"); default: all visible.'
+    )
+    max_batch_tokens: int = Field(
+        default=16384, gt=0, description="Default per-batch padded-token budget."
+    )
+    max_batch_items: int | None = Field(
+        default=None, gt=0, description="Per-batch item-count cap (bounds zero-cost batches)."
+    )
+    device_weights: Annotated[dict[int, float], NoDecode] = Field(
+        default_factory=dict,
+        description='Per-device speed-weight overrides, e.g. "0=1.0,1=0.35".',
+    )
+    device_batch_tokens: Annotated[dict[int, int], NoDecode] = Field(
+        default_factory=dict,
+        description='Per-device token-budget overrides, e.g. "0=16384,1=4096".',
+    )
 
     @classmethod
     def settings_customise_sources(

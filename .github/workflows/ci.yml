@@ -36,3 +36,33 @@ jobs:
 
       - name: Pytest (CPU)
         run: uv run pytest -m "not gpu"
+
+  # End-to-end proof of the torch-free core rule that the ast guard test
+  # only checks statically: the built wheel must install and run without
+  # the gpu extra.
+  package:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Build wheel and sdist
+        run: uv build
+
+      - name: Install the wheel into a clean env (no gpu extra)
+        run: |
+          uv venv /tmp/smoke --python ${{ matrix.python-version }}
+          uv pip install --python /tmp/smoke/bin/python dist/*.whl
+
+      - name: Torch-free import and CLI smoke
+        run: |
+          /tmp/smoke/bin/python -c "import embedx; print(embedx.__version__)"
+          /tmp/smoke/bin/embedx --help
+          /tmp/smoke/bin/embedx info --model-id smoke-test --pooling mean
