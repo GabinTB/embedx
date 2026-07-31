@@ -52,6 +52,15 @@ dev = [
     "httpx>=0.27",
     "ruff>=0.6",
     "mypy>=1.11",
+    # Tooling for the dev/ notebooks. They are not part of the package and are
+    # excluded from ruff, but they are the validation evidence, so the stack to
+    # run them is pinned here rather than left to ad-hoc `--with` flags.
+    # `datasets` is what notebooks 02 and 03 load the real corpus with; torch
+    # and transformers come from the `gpu` extra, which 03 additionally needs.
+    "jupyterlab>=4.2",
+    "ipykernel>=6.29",
+    "matplotlib>=3.8",
+    "datasets>=2.20",
 ]
 
 [project.scripts]

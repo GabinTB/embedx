@@ -4,15 +4,23 @@ Exploratory notebooks that validate embedx's design claims. **Not part of the
 package**: not imported by `embedx`, not covered by tests, excluded from ruff
 (see `[tool.ruff] exclude` in pyproject.toml).
 
-Jupyter and matplotlib are not project dependencies; run them ephemerally:
+The notebook stack (jupyterlab, ipykernel, matplotlib, datasets) ships in the
+`dev` extra, so no ad-hoc `--with` flags are needed:
 
 ```
-# 01 and 02 (CPU only; 02 uses a synthetic fallback without `datasets`):
-uv run --with jupyterlab --with matplotlib jupyter lab
+# 01 and 02 (CPU only):
+uv sync --extra dev
+uv run jupyter lab
 
-# 02 with the real corpus, and 03 (CUDA host only):
+# 03 additionally needs a CUDA host and the gpu extra:
 uv sync --extra dev --extra gpu
-uv run --with jupyterlab --with matplotlib --with datasets jupyter lab
+uv run jupyter lab
+```
+
+To execute one headlessly instead of in the browser:
+
+```
+uv run jupyter nbconvert --to notebook --execute --inplace dev/03_real_gpu_throughput.ipynb
 ```
 
 - `01_scheduling_visualization.ipynb` — pure simulation over the real
