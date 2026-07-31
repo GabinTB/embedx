@@ -92,6 +92,9 @@ include = [
 line-length = 100
 target-version = "py311"
 src = ["src", "tests"]
+# dev/ holds exploratory notebooks; ruff lints .ipynb by default and the
+# gate runs `ruff check .`, so exclude them (pytest already scopes to tests/).
+exclude = ["dev"]
 
 [tool.ruff.lint]
 select = [
