@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import re
 from pathlib import Path
 
@@ -12,13 +11,7 @@ from pydantic_settings import SettingsError
 
 from embedx.config import Dtype, Pooling, Settings
 
-
-@pytest.fixture(autouse=True)
-def _clean_embedx_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Isolate from the developer's real environment.
-    for key in list(os.environ):
-        if key.upper().startswith("EMBEDX_"):
-            monkeypatch.delenv(key, raising=False)
+# Env isolation for these tests lives in conftest.py (_clean_embedx_env).
 
 
 def make_settings(**overrides: object) -> Settings:
