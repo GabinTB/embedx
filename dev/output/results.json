@@ -47,8 +47,8 @@
     }
   ],
   "h2d_gib_s": {
-    "0": 6.359867506161583,
-    "1": 2.8231674405150784
+    "0": 6.3613728480192595,
+    "1": 2.812591978768703
   },
   "other_vram_users": "`ollama serve` is running on this host (it always is) but had no model resident at the start of this run: nvidia-smi showed 34 MiB on cuda:0 and 1 MiB on cuda:1, which is driver/display overhead, not a workload. No inference request was issued to it during the benchmark. The start/end free-VRAM comparison in the final cell is what proves that.",
   "vram_free_start_end_gib": {
@@ -185,6 +185,47 @@
           "idle_s": 0.007317636000038874
         }
       ]
+    }
+  },
+  "correctness_check": {
+    "passed": true,
+    "max_abs_diff": 0.001953125,
+    "probe_texts": 256,
+    "dtype": "torch.bfloat16",
+    "single_device_batching_bit_identical": true,
+    "sharded_fp32_max_abs_diff": 1.825392246246338e-07,
+    "cross_card_fp32_max_abs_diff": 1.564621925354004e-07,
+    "misordered_rows": 0,
+    "min_self_cosine": 0.9999623894691467
+  },
+  "pcie_link": {
+    "0": {
+      "before_first_transfer": "gen3x8",
+      "after_warmup": "gen3x8",
+      "during_timed_region": [
+        "gen3x8"
+      ],
+      "trained_width": 8,
+      "gen_max": 3,
+      "gpu_gen_max": 5,
+      "host_gen_max": 3,
+      "at_gen_max_while_timed": true,
+      "theoretical_gib_s": 7.344,
+      "fraction_of_theoretical": 0.8662000065385702
+    },
+    "1": {
+      "before_first_transfer": "gen3x4",
+      "after_warmup": "gen3x4",
+      "during_timed_region": [
+        "gen3x4"
+      ],
+      "trained_width": 4,
+      "gen_max": 3,
+      "gpu_gen_max": 4,
+      "host_gen_max": 3,
+      "at_gen_max_while_timed": true,
+      "theoretical_gib_s": 3.672,
+      "fraction_of_theoretical": 0.7659564212333069
     }
   }
 }
