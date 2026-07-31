@@ -58,6 +58,11 @@ class Engine:
         # device instead of oversubscribing VRAM.
         self._backend_locks = [threading.Lock() for _ in self._backends]
 
+    @property
+    def devices_with_budgets(self) -> list[tuple[DeviceInfo, int]]:
+        """(device, token budget) per worker in rank order; used by /info."""
+        return list(zip(self._devices, self._budgets, strict=True))
+
     def embed(self, texts: list[str]) -> np.ndarray:
         """Embed `texts`; row i of the result corresponds to `texts[i]`."""
         if not texts:
