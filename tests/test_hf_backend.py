@@ -16,7 +16,12 @@ from embedx.config import Dtype, Pooling
 pytestmark = pytest.mark.gpu
 
 ST_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
-PLAIN_MODEL = "prajjwal1/bert-tiny"
+# A plain (non-sentence-transformers) checkpoint, so this exercises the
+# AutoModel path and embedx's own pooling rather than the ST module stack.
+# NOT prajjwal1/bert-tiny: its config.json predates the `model_type` key, so
+# transformers >=5 cannot resolve it through AutoConfig/AutoModel/AutoTokenizer
+# at all. This is the Google checkpoint that one is a re-upload of.
+PLAIN_MODEL = "google/bert_uncased_L-2_H-128_A-2"
 MAX_LEN = 128
 
 
