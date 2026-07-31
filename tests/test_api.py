@@ -29,6 +29,14 @@ class FakeEngine:
         self.calls.append(texts)
         return self.inner.embed(texts)
 
+    def token_count(self, texts: list[str]) -> int:
+        # Mirrors the real Engine with the default `len` length function.
+        return sum(len(text) for text in texts)
+
+    @property
+    def truncated_counts(self) -> list[int]:
+        return [0]
+
     @property
     def devices_with_budgets(self) -> list[tuple[DeviceInfo, int]]:
         device = DeviceInfo(
@@ -46,6 +54,24 @@ class FakeEngine:
 class ExplodingEngine(FakeEngine):
     def embed(self, texts: list[str]) -> np.ndarray:
         raise RuntimeError("cuda exploded: secret internal details")
+
+
+class TokenCountingEngine(FakeEngine):
+    """Length function that is deliberately NOT len: 1000 per text."""
+
+    def token_count(self, texts: list[str]) -> int:
+        return 1000 * len(texts)
+
+
+class WrongShapeEngine(FakeEngine):
+    def embed(self, texts: list[str]) -> np.ndarray:
+        return np.zeros(len(texts), dtype=np.float32)  # 1-D, not (n, dim)
+
+
+class TruncatingEngine(FakeEngine):
+    @property
+    def truncated_counts(self) -> list[int]:
+        return [7]
 
 
 def make_settings(**overrides: object) -> Settings:
@@ -94,6 +120,16 @@ def test_openai_shape_and_index_order() -> None:
         np.testing.assert_array_equal(
             np.asarray(item["embedding"], dtype=np.float32), reference[position]
         )
+
+
+def test_usage_uses_engine_length_function_not_characters() -> None:
+    # A regression back to character counting fails here: the fake engine's
+    # length function is deliberately not len.
+    client = make_client(TokenCountingEngine())
+    texts = ["hello world", "abc"]
+    body = client.post("/v1/embeddings", json={"input": texts, "model": "m"}).json()
+    assert body["usage"] == {"prompt_tokens": 2000, "total_tokens": 2000}
+    assert body["usage"]["prompt_tokens"] != sum(len(t) for t in texts)
 
 
 def test_single_string_equals_single_item_list() -> None:
@@ -184,6 +220,45 @@ def test_oversized_body_is_413_before_parsing() -> None:
     assert "max_request_bytes" in response.json()["error"]["message"]
 
 
+def _chunked_post(client: TestClient, payload: dict, path: str = "/v1/embeddings") -> object:
+    # httpx sends an iterator body as Transfer-Encoding: chunked, no
+    # Content-Length — the path that bypasses the header fast path.
+    import json
+
+    raw = json.dumps(payload).encode()
+
+    def chunks() -> object:
+        for start in range(0, len(raw), 64):
+            yield raw[start : start + 64]
+
+    return client.post(path, content=chunks(), headers={"Content-Type": "application/json"})
+
+
+def test_chunked_body_over_limit_is_413() -> None:
+    client = make_client(max_request_bytes=200)
+    response = _chunked_post(client, {"input": ["x" * 500], "model": "m"})
+    assert response.status_code == 413  # type: ignore[attr-defined]
+    _assert_envelope(response.json())  # type: ignore[attr-defined]
+    assert "max_request_bytes" in response.json()["error"]["message"]  # type: ignore[attr-defined]
+
+
+def test_chunked_body_under_limit_succeeds() -> None:
+    client = make_client(max_request_bytes=10_000)
+    response = _chunked_post(client, {"input": ["hello"], "model": "m"})
+    assert response.status_code == 200  # type: ignore[attr-defined]
+    assert response.json()["data"][0]["index"] == 0  # type: ignore[attr-defined]
+
+
+def test_wrong_width_engine_fails_loudly_not_serialized() -> None:
+    # Response-model validation: a 1-D array cannot quietly serialize into
+    # the OpenAI shape; it must surface as the generic 500 envelope.
+    client = make_client(WrongShapeEngine())
+    response = client.post("/v1/embeddings", json={"input": ["a", "b"], "model": "m"})
+    assert response.status_code == 500
+    _assert_envelope(response.json())
+    assert response.json()["error"]["message"] == "internal server error"
+
+
 def test_empty_input_list_is_400() -> None:
     client = make_client()
     response = client.post("/v1/embeddings", json={"input": [], "model": "m"})
@@ -253,5 +328,17 @@ def test_info_reflects_settings_and_devices() -> None:
     assert body["dtype"] == "float16"
     assert body["version"] == embedx.__version__
     assert body["devices"] == [
-        {"index": 0, "name": "Fake GPU 0", "weight": 1.0, "max_batch_tokens": 16384}
+        {
+            "index": 0,
+            "name": "Fake GPU 0",
+            "weight": 1.0,
+            "max_batch_tokens": 16384,
+            "truncated_count": 0,
+        }
     ]
+
+
+def test_info_reports_truncation_counts() -> None:
+    client = make_client(TruncatingEngine())
+    body = client.get("/info").json()
+    assert body["devices"][0]["truncated_count"] == 7

@@ -5,22 +5,78 @@ from __future__ import annotations
 import base64
 import logging
 import secrets
-from collections.abc import Awaitable, Callable
 from typing import Annotated, Any
 
 import numpy as np
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from embedx import __version__
 from embedx.api.errors import error_body, install_error_handlers
-from embedx.api.schemas import EmbeddingsRequest, EmbedRequest
+from embedx.api.schemas import (
+    EmbeddingObject,
+    EmbeddingsRequest,
+    EmbeddingsResponse,
+    EmbedRequest,
+    Usage,
+)
 from embedx.config import Settings
 from embedx.engine.engine import Engine
 
 logger = logging.getLogger("embedx.api")
+
+
+class _BodyLimitMiddleware:
+    """Reject oversized request bodies.
+
+    Content-Length is the fast path: rejected before any parsing. A request
+    without one (chunked transfer) would bypass the cap entirely, so its
+    receive channel is wrapped to count bytes as the endpoint consumes the
+    stream — the body is never buffered here.
+    """
+
+    def __init__(self, app: Any, max_bytes: int) -> None:
+        self.app = app
+        self.max_bytes = max_bytes
+
+    async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        headers = dict(scope.get("headers", []))
+        raw_length = headers.get(b"content-length")
+        if raw_length is not None:
+            if raw_length.isdigit() and int(raw_length) > self.max_bytes:
+                response = JSONResponse(
+                    status_code=413,
+                    content=error_body(f"request body exceeds max_request_bytes={self.max_bytes}"),
+                )
+                await response(scope, receive, send)
+                return
+            await self.app(scope, receive, send)
+            return
+
+        received = 0
+
+        async def counting_receive() -> dict[str, Any]:
+            nonlocal received
+            message: dict[str, Any] = await receive()
+            if message["type"] == "http.request":
+                received += len(message.get("body", b""))
+                if received > self.max_bytes:
+                    # HTTPException on purpose: FastAPI's body-read guard
+                    # re-raises HTTPException untouched but converts any
+                    # other exception into a generic 400.
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"request body exceeds max_request_bytes={self.max_bytes}",
+                    )
+            return message
+
+        await self.app(scope, counting_receive, send)
+
 
 # Module-level on purpose: with `from __future__ import annotations` the
 # Annotated[..., Depends(_bearer)] annotation below is evaluated lazily
@@ -59,20 +115,7 @@ def create_app(settings: Settings, engine: Engine) -> FastAPI:
         ):
             raise HTTPException(status_code=401, detail="invalid or missing API key")
 
-    @app.middleware("http")
-    async def limit_body_size(
-        request: Request, call_next: Callable[[Request], Awaitable[Response]]
-    ) -> Response:
-        # Reject oversized bodies on Content-Length, before any parsing.
-        length = request.headers.get("content-length")
-        if length is not None and length.isdigit() and int(length) > settings.max_request_bytes:
-            return JSONResponse(
-                status_code=413,
-                content=error_body(
-                    f"request body exceeds max_request_bytes={settings.max_request_bytes}"
-                ),
-            )
-        return await call_next(request)
+    app.add_middleware(_BodyLimitMiddleware, max_bytes=settings.max_request_bytes)
 
     def _as_texts(value: str | list[str]) -> list[str]:
         texts = [value] if isinstance(value, str) else value
@@ -87,7 +130,7 @@ def create_app(settings: Settings, engine: Engine) -> FastAPI:
         return texts
 
     @app.post("/v1/embeddings", dependencies=[Depends(require_auth)])
-    async def embeddings(request: EmbeddingsRequest) -> dict[str, Any]:
+    async def embeddings(request: EmbeddingsRequest) -> EmbeddingsResponse:
         texts = _as_texts(request.input)
         vectors = await run_in_threadpool(engine.embed, texts)
         if request.dimensions is not None and request.dimensions != vectors.shape[1]:
@@ -98,7 +141,7 @@ def create_app(settings: Settings, engine: Engine) -> FastAPI:
                     f"output width {vectors.shape[1]}; embedx does not truncate vectors"
                 ),
             )
-        data = []
+        data: list[EmbeddingObject] = []
         for index, vector in enumerate(vectors):
             embedding: list[float] | str
             if request.encoding_format == "base64":
@@ -109,16 +152,15 @@ def create_app(settings: Settings, engine: Engine) -> FastAPI:
                 ).decode("ascii")
             else:
                 embedding = vector.tolist()
-            data.append({"object": "embedding", "index": index, "embedding": embedding})
-        # Character-based approximation (the same length measure the engine
-        # batches with) until task 08 supplies a real tokenizer.
-        chars = sum(len(text) for text in texts)
-        return {
-            "object": "list",
-            "data": data,
-            "model": request.model,
-            "usage": {"prompt_tokens": chars, "total_tokens": chars},
-        }
+            data.append(EmbeddingObject(index=index, embedding=embedding))
+        # Engine.token_count measures in the engine's own unit: real tokens
+        # on the GPU factory path, characters with the default `len`.
+        total = await run_in_threadpool(engine.token_count, texts)
+        return EmbeddingsResponse(
+            data=data,
+            model=request.model,
+            usage=Usage(prompt_tokens=total, total_tokens=total),
+        )
 
     @app.post("/embed", dependencies=[Depends(require_auth)])
     async def embed(request: EmbedRequest) -> list[list[float]]:
@@ -146,8 +188,12 @@ def create_app(settings: Settings, engine: Engine) -> FastAPI:
                     "name": device.name,
                     "weight": device.weight,
                     "max_batch_tokens": budget,
+                    # Silent truncation must be visible somewhere in prod.
+                    "truncated_count": truncated,
                 }
-                for device, budget in engine.devices_with_budgets
+                for (device, budget), truncated in zip(
+                    engine.devices_with_budgets, engine.truncated_counts, strict=True
+                )
             ],
         }
 

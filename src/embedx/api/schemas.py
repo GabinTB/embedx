@@ -53,10 +53,11 @@ class EmbeddingObject(BaseModel):
 
 
 class Usage(BaseModel):
-    # No tokenizer exists at this layer yet: these counts use the same
-    # character-length measure the engine batches with. A character-based
-    # approximation until task 08 (hf backend) supplies real token counts —
-    # not an invented token count.
+    # Counts come from Engine.token_count, i.e. the same length measure the
+    # engine batches with: real token counts when the tokenizer-based
+    # length_fn is injected (the GPU factory path), plain character counts
+    # with the default `len` (fakes and CPU tests) — correct for those,
+    # since no tokenizer exists there.
     prompt_tokens: int
     total_tokens: int
 

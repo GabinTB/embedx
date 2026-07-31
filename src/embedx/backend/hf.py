@@ -41,7 +41,17 @@ def _is_st_checkpoint(model_id: str, revision: str | None) -> bool:
         from huggingface_hub import file_exists
 
         return bool(file_exists(model_id, "modules.json", revision=revision))
-    except Exception:  # offline / gated / hub error: fall back to AutoModel
+    except Exception as exc:
+        # Not silent: a cached ST model with an unreachable hub would be
+        # served through the plain path, and the operator must know that.
+        logger.warning(
+            "could not determine whether %s is a sentence-transformers "
+            "checkpoint (%s: %s); using the plain AutoModel path with the "
+            "configured pooling",
+            model_id,
+            type(exc).__name__,
+            exc,
+        )
         return False
 
 
@@ -100,6 +110,7 @@ class HFBackend:
         self.truncated_count = 0
         self.dim: int = 0
         self.max_seq_length: int = 0
+        self._length_cache: dict[str, int] = {}
         self._tokenizer: Any = None
         self._st_model: Any = None
         self._model: Any = None
@@ -213,10 +224,10 @@ class HFBackend:
         return self._embed_auto(texts)
 
     def _count_truncations(self, texts: list[str]) -> None:
-        # Tensor-free second pass: silent truncation changes results, so it
-        # is counted, and the first occurrence is logged.
-        encoded = self._tokenizer(texts, truncation=False, padding=False)["input_ids"]
-        truncated = sum(1 for ids in encoded if len(ids) > self.max_seq_length)
+        # A text is truncated exactly when its unclamped token length
+        # exceeds the clamp — read from the cache the batcher's length_fn
+        # already filled, so no re-tokenization happens here.
+        truncated = sum(1 for text in texts if self._raw_token_length(text) > self.max_seq_length)
         if truncated:
             if self.truncated_count == 0:
                 logger.warning(
@@ -265,12 +276,28 @@ class HFBackend:
     # Length model
     # ------------------------------------------------------------------ #
 
+    def _raw_token_length(self, text: str) -> int:
+        """Unclamped token length, cached.
+
+        The cache is what keeps each text to ONE tokenization per request
+        across `length_fn` (the batcher) and `_count_truncations` (embed).
+        The bound is crude — full clear at capacity — because repeats
+        matter within a request, not across the process lifetime.
+        """
+        cached = self._length_cache.get(text)
+        if cached is not None:
+            return cached
+        length = len(self._tokenizer(text, truncation=False, padding=False)["input_ids"])
+        if len(self._length_cache) >= 65536:
+            self._length_cache.clear()
+        self._length_cache[text] = length
+        return length
+
     def length_fn(self, text: str) -> int:
         """True token length, clamped to `max_seq_length`, for the batcher.
 
-        No padding, no tensors: this runs once per input per request. The
-        clamp matters because an over-long text is truncated by `embed`, so
-        its real padded cost is `max_seq_length`, not its raw length.
+        No padding, no tensors. The clamp matters because an over-long text
+        is truncated by `embed`, so its real padded cost is
+        `max_seq_length`, not its raw length.
         """
-        ids = self._tokenizer(text, truncation=False, padding=False)["input_ids"]
-        return min(len(ids), self.max_seq_length)
+        return min(self._raw_token_length(text), self.max_seq_length)

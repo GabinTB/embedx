@@ -68,6 +68,19 @@ class Engine:
         """(device, token budget) per worker in rank order; used by /info."""
         return list(zip(self._devices, self._budgets, strict=True))
 
+    @property
+    def truncated_counts(self) -> list[int]:
+        """Per-worker truncation counters; 0 for backends without one."""
+        return [int(getattr(backend, "truncated_count", 0)) for backend in self._backends]
+
+    def token_count(self, texts: list[str]) -> int:
+        """Total input length in the engine's own unit.
+
+        Real tokens when the factory injected the tokenizer-based
+        `length_fn`; characters with the default `len` (fakes, CPU tests).
+        """
+        return sum(self._length_fn(text) for text in texts)
+
     def embed(self, texts: list[str]) -> np.ndarray:
         """Embed `texts`; row i of the result corresponds to `texts[i]`."""
         if not texts:
