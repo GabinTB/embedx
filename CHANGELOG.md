@@ -53,6 +53,12 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - CUDA only; no CPU serving.
 - Pre-tokenized input (token arrays) is rejected.
 - One model per server instance.
-- The two-GPU throughput benchmark (`dev/03_real_gpu_throughput.ipynb`) has
-  not yet been executed on the reference host; the README carries no
-  throughput numbers until it is.
+- Throughput is measured on exactly one machine. On an RTX PRO 2000
+  Blackwell + RTX A400 host, over 8,000 real `fancyzhx/ag_news` texts, the
+  converging queue is 14.30% faster than the fast GPU alone and 9.43% faster
+  than a static split weighted by embedx's own device weights, with both
+  devices idle under 8 ms against 0.667 s for the weighted split
+  (`dev/03_real_gpu_throughput.ipynb`, raw values in
+  `dev/output/results.json`). Those two cards differ by roughly 11:1, which
+  caps what a second device can add; no claim is made about other pairings,
+  larger models, or more than two GPUs.

@@ -50,7 +50,9 @@ There is also a TEI-style `POST /embed` (bare vectors), `GET /health`, and
 
 ## Measured results
 
-**Padding waste** (from [`dev/02_padding_savings.ipynb`](dev/02_padding_savings.ipynb),
+### Padding waste
+
+(From [`dev/02_padding_savings.ipynb`](dev/02_padding_savings.ipynb),
 `fancyzhx/ag_news` train[:2000] tokenized with MiniLM — 112,980 real tokens,
 median 53, p95 102 — waste = padded − real tokens as a fraction of padded):
 fixed item-count batching in arrival order wastes **38.0%** of compute at
@@ -60,38 +62,79 @@ batching wastes **1.0%** at a 1,024-token budget, **13.3%** at 16,384,
 2,000-char document in a fixed batch of 32 short texts wastes **96.4%** of
 the batch; length-sorted batching isolates it and wastes **0%**.
 
-**Scheduling balance** (simulation, [`dev/01_scheduling_visualization.ipynb`](dev/01_scheduling_visualization.ipynb),
-real `Scheduler` + the length-sensitive fake cost model): with a 3× speed
+### Scheduling balance
+
+(Simulation, [`dev/01_scheduling_visualization.ipynb`](dev/01_scheduling_visualization.ipynb),
+real `Scheduler` + the length-sensitive fake cost model.) With a 3× speed
 gap, the fast worker takes **78.6%** of tokens and both workers finish within
 **0.8%** of each other; across 1×–10× speed ratios the fast worker's item
 share adapts from 0.21 to 0.72 with zero configuration.
 
-**Two-GPU throughput on real hardware** (from
-[`dev/03_real_gpu_throughput.ipynb`](dev/03_real_gpu_throughput.ipynb), raw
-values in [`dev/output/results.json`](dev/output/results.json)): RTX PRO 2000
-(Blackwell, 16 GB, cc 12.0) + RTX A400 (4 GB, PCIe 3.0 x4, cc 8.6), driver
-610.43.02, torch 2.13.0+cu130. 8,000 ag_news texts / 442,423 tokens through
-MiniLM-L6-v2, mean pooling, bfloat16, `max_batch_tokens=16384`; medians of 5
-runs after 2 discarded warmups, correctness asserted before any timing.
+### Two-GPU throughput on real hardware
 
-| configuration | makespan | throughput | idle (dev0 / dev1) |
-|---|---|---|---|
-| fast GPU alone | 1.085 s | 407,815 tok/s | 0.001 s / — |
-| static 50/50 by tokens | 1.614 s | 274,098 tok/s | 0.984 s / 0.000 s |
-| static weighted | 1.039 s | 425,939 tok/s | 0.001 s / 0.667 s |
-| **converging queue** | **0.949 s** | **466,118 tok/s** | 0.003 s / 0.007 s |
+From [`dev/03_real_gpu_throughput.ipynb`](dev/03_real_gpu_throughput.ipynb).
+Every figure below is transcribed from
+[`dev/output/results.json`](dev/output/results.json), which that notebook
+writes; nothing here was retyped out of a cell.
 
-The converging queue is **1.14x** the single fast GPU and **1.09x** a tuned
-weighted static split. That margin is modest and the reason is structural:
-these two cards differ by roughly 11:1, so a second GPU of that size cannot
-buy much. What the numbers do show is balance. `device_weights` allot the
-A400 8.1% of the work; allowed to pull, it took **21.5%** — which is why the
-weighted split leaves it idle for 0.667 s, 64% of its own makespan, while the
-converging queue idles both devices for under 8 ms. Splitting evenly is worse
-than ignoring the second GPU entirely: **1.49x slower** than one card alone.
-Measured H2D bandwidth differs by 2.25x (6.4 vs 2.8 GiB/s) against a
-configured weight ratio of 11.3x, and the queue is indifferent to that
-miscalibration — which is the tuning burden it exists to remove.
+**Hardware:** NVIDIA RTX PRO 2000 Blackwell (16 GB, cc 12.0) + NVIDIA RTX
+A400 (4 GB, PCIe 3.0 x4, cc 8.6), driver 610.43.02, torch 2.13.0+cu130
+(CUDA 13.0).
+
+**Corpus:** `fancyzhx/ag_news` train[:8000] — **8,000 real news headlines**,
+442,423 MiniLM tokens, median 53 per text. Real text, deliberately: an
+earlier draft of the notebook fell back to generated filler when the dataset
+id stopped resolving, and every number that run produced has been discarded
+rather than reused. MiniLM-L6-v2, mean pooling, `dtype=auto` (bfloat16 on
+both cards), `max_batch_tokens=16384`. Medians of 5 timed runs after 2
+discarded warmups, with correctness asserted *before* any timing: order
+preserved for all 256 probe rows, minimum self-cosine 0.999962, and a
+maximum absolute difference from the single-GPU result of 1.95e-03 — which
+is bfloat16's own resolution, not scheduler drift (`correctness_check` in
+`results.json`).
+
+| configuration | makespan | throughput | dev0 idle | dev1 idle |
+|---|---|---|---|---|
+| fast GPU alone | 1.085 s | 407,815 tok/s | 0.001 s | no work |
+| static 50/50 by tokens | 1.614 s | 274,098 tok/s | 0.984 s | 0.000 s |
+| static weighted | 1.039 s | 425,939 tok/s | 0.001 s | 0.667 s |
+| **converging queue** | **0.949 s** | **466,118 tok/s** | 0.003 s | 0.007 s |
+
+Against the fast GPU alone, the converging queue is **14.30% faster**
+(1.143x). Against a static split weighted by the same device weights embedx
+computes for itself, it is **9.43% faster** (1.094x). The IQRs do not
+overlap (1.035–1.041 s vs 0.948–0.974 s), so the second margin is
+reproducible rather than noise — but it is single digits, and worth being
+plain about why.
+
+The static weight is a coarse architectural score: multiprocessor count
+times an architecture factor, computed without running anything. It rates
+the A400 at 8.1% of the pair, and on this workload that is simply too low —
+given a queue to pull from, the A400 absorbed **21.5%** of the tokens
+(95,242 of 442,423, 32% of the items). The weighted static split therefore
+starves it and then waits: it sits idle 0.667 s of a 1.039 s run, **64% of
+the run**, while the fast card finishes the backlog it should never have
+been given. The converging queue configures no ratio at all and finds the
+split empirically, ending with both devices idle for under 8 ms. Getting a
+static split *right* requires knowing that 21.5% number in advance, per
+workload, per model; the queue's claim is that you should not have to.
+
+Guessing the split wrong is expensive in the other direction too: an even
+token split is **1.49x slower than not using the second GPU at all**
+(1.614 s vs 1.085 s), because the slow card is handed half the work and the
+fast one waits 0.98 s for it.
+
+Measured host-to-device bandwidth is **6.36 GiB/s** on device 0 (PCIe 3.0
+x8) and **2.81 GiB/s** on device 1 (PCIe 3.0 x4) — 87% and 77% of their
+respective link ceilings, with the PCIe link generation sampled across the
+timed region to confirm it had trained to the host maximum first (both links
+park at Gen1 when idle, so a cold measurement would understate them). Note
+what those numbers do to the weights: the cards differ by **2.26x** in
+transfer bandwidth while their configured weight ratio is **11.33x**. No
+single static number describes this pair, which is the argument for
+`EMBEDX_DEVICE_WEIGHTS` being an override you may never need rather than a
+knob you must tune — the queue reaches the right split whether the weights
+are calibrated or not.
 
 ## Configuration
 
