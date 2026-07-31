@@ -151,6 +151,7 @@ drift:
 | `EMBEDX_NORMALIZE` | bool | True | L2-normalize embeddings after pooling. |
 | `EMBEDX_DTYPE` | auto / float32 / float16 / bfloat16 | 'auto' | Compute dtype; auto resolves by device capability (bf16/fp16/fp32). |
 | `EMBEDX_MAX_SEQ_LEN` | int or None | None | Max sequence length in tokens; longer inputs are truncated and counted. |
+| `EMBEDX_WRAPPING` | str or None | None | Template wrapping every input, e.g. "Q: {text}"; must contain '{text}' exactly once. Unset means inputs are passed through untouched. |
 | `EMBEDX_HOST` | str | '127.0.0.1' | Bind address; loopback by default. |
 | `EMBEDX_PORT` | int | 8477 | Bind port (1024-65535). |
 | `EMBEDX_API_KEY` | str or None | None | Bearer API key; unset disables auth entirely. |

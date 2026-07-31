@@ -230,3 +230,59 @@ def test_settings_are_frozen_and_reject_unknown_fields() -> None:
         settings.port = 9999  # type: ignore[misc]
     with pytest.raises(ValidationError):
         make_settings(bogus_field=1)
+
+
+# --------------------------------------------------------------------------- #
+# Wrapping template
+# --------------------------------------------------------------------------- #
+
+
+def test_wrapping_defaults_to_none_and_wrap_is_identity() -> None:
+    settings = make_settings()
+    assert settings.wrapping is None
+    assert settings.wrap("hello {text} world") == "hello {text} world"
+
+
+def test_wrapping_valid_template_substitutes() -> None:
+    settings = make_settings(wrapping="Q: {text}")
+    assert settings.wrapping == "Q: {text}"
+    assert settings.wrap("banana") == "Q: banana"
+
+
+@pytest.mark.parametrize("value", ["no placeholder here", "", "{}", "{other}"])
+def test_wrapping_without_the_placeholder_is_rejected(value: str) -> None:
+    # Zero placeholders would embed one constant string for every request.
+    with pytest.raises(ValidationError) as excinfo:
+        make_settings(wrapping=value)
+    message = str(excinfo.value)
+    assert repr(value) in message, "the error must name the offending value"
+    assert "{text}" in message
+
+
+@pytest.mark.parametrize("value", ["{text} {text}", "a{text}b{text}c{text}"])
+def test_wrapping_with_repeated_placeholder_is_rejected(value: str) -> None:
+    # Two is ambiguous, not a licence to guess which one was meant.
+    with pytest.raises(ValidationError) as excinfo:
+        make_settings(wrapping=value)
+    message = str(excinfo.value)
+    assert repr(value) in message, "the error must name the offending value"
+    assert "ambiguous" in message
+
+
+def test_wrapping_with_an_extra_placeholder_is_rejected() -> None:
+    # Would raise KeyError per request instead of at startup.
+    with pytest.raises(ValidationError) as excinfo:
+        make_settings(wrapping="{context}: {text}")
+    assert repr("{context}: {text}") in str(excinfo.value)
+
+
+def test_wrapping_escaped_placeholder_is_rejected() -> None:
+    # Contains the substring, formats to a literal, drops the input.
+    with pytest.raises(ValidationError) as excinfo:
+        make_settings(wrapping="{{text}}")
+    assert "escaped" in str(excinfo.value)
+
+
+def test_wrapping_from_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("EMBEDX_WRAPPING", "passage: {text}")
+    assert make_settings().wrapping == "passage: {text}"

@@ -27,6 +27,11 @@ from pydantic_settings import (
 
 CONFIG_PATH_ENV_VAR = "EMBEDX_CONFIG"
 
+WRAPPING_PLACEHOLDER = "{text}"
+# Sentinel used only to prove the template really substitutes: a value no
+# plausible template contains literally.
+_WRAPPING_PROBE = "\x00embedx-probe\x00"
+
 
 class Pooling(StrEnum):
     """How token embeddings are reduced to one vector per text."""
@@ -142,6 +147,11 @@ class Settings(BaseSettings):
         gt=0,
         description="Max sequence length in tokens; longer inputs are truncated and counted.",
     )
+    wrapping: str | None = Field(
+        default=None,
+        description='Template wrapping every input, e.g. "Q: {text}"; must contain '
+        "'{text}' exactly once. Unset means inputs are passed through untouched.",
+    )
 
     # Server
     host: str = Field(default="127.0.0.1", description="Bind address; loopback by default.")
@@ -200,6 +210,46 @@ class Settings(BaseSettings):
                 "Set pooling to one of: cls, mean, last_token."
             )
         return data
+
+    @field_validator("wrapping")
+    @classmethod
+    def _check_wrapping(cls, value: str | None) -> str | None:
+        """Reject templates that would drop or duplicate the caller's input.
+
+        Both failure modes are silent at request time -- zero placeholders
+        embeds one constant string for every request, two embeds the input
+        twice -- so neither is guessed around. They are configuration
+        errors, raised here with the offending value in the message.
+        """
+        if value is None:
+            return value
+        found = value.count(WRAPPING_PLACEHOLDER)
+        if found != 1:
+            reason = (
+                "zero occurrences would drop the input and embed a constant string"
+                if found == 0
+                else f"{found} occurrences are ambiguous"
+            )
+            raise ValueError(
+                f"wrapping must contain {WRAPPING_PLACEHOLDER!r} exactly once "
+                f"({reason}); got {value!r}"
+            )
+        try:
+            rendered = value.format(text=_WRAPPING_PROBE)
+        except (IndexError, KeyError, ValueError) as exc:
+            raise ValueError(
+                f"wrapping {value!r} is not a usable format template "
+                f"({type(exc).__name__}: {exc}): {WRAPPING_PLACEHOLDER!r} must be the "
+                "only placeholder, and any other brace must be doubled"
+            ) from None
+        if _WRAPPING_PROBE not in rendered:
+            # "{{text}}" contains the substring but formats to a literal, so
+            # the count above passes while the input still goes nowhere.
+            raise ValueError(
+                f"wrapping {value!r} does not substitute the input: "
+                f"{WRAPPING_PLACEHOLDER!r} is escaped rather than a placeholder"
+            )
+        return value
 
     @field_validator("devices", mode="before")
     @classmethod
@@ -273,6 +323,15 @@ class Settings(BaseSettings):
                     f"devices {sorted(allowed)}: the override would silently do nothing"
                 )
         return self
+
+    def wrap(self, text: str) -> str:
+        """Apply the configured wrapping template; identity when unset.
+
+        Validated at construction, so `format` cannot fail here.
+        """
+        if self.wrapping is None:
+            return text
+        return self.wrapping.format(text=text)
 
     @property
     def is_exposed_without_auth(self) -> bool:

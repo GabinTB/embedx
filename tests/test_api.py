@@ -63,6 +63,17 @@ class TokenCountingEngine(FakeEngine):
         return 1000 * len(texts)
 
 
+class WordCountingEngine(FakeEngine):
+    """Length function that is not len, but still depends on the text.
+
+    Wrapping has to change this number, which a fixed-per-item count could
+    not detect.
+    """
+
+    def token_count(self, texts: list[str]) -> int:
+        return sum(len(text.split()) for text in texts)
+
+
 class WrongShapeEngine(FakeEngine):
     def embed(self, texts: list[str]) -> np.ndarray:
         return np.zeros(len(texts), dtype=np.float32)  # 1-D, not (n, dim)
@@ -342,3 +353,61 @@ def test_info_reports_truncation_counts() -> None:
     client = make_client(TruncatingEngine())
     body = client.get("/info").json()
     assert body["devices"][0]["truncated_count"] == 7
+
+
+# --------------------------------------------------------------------------- #
+# wrapping template
+# --------------------------------------------------------------------------- #
+
+
+def test_wrapping_applied_to_every_input() -> None:
+    engine = FakeEngine()
+    client = make_client(engine, wrapping="Q: {text}")
+    texts = ["banana", "a longer piece of text", "", "unicode: café"]
+    response = client.post("/v1/embeddings", json={"input": texts, "model": "m"})
+    assert response.status_code == 200
+    # The engine records exactly what it was handed.
+    assert engine.calls == [["Q: " + text for text in texts]]
+
+
+def test_wrapping_applies_to_tei_endpoint_too() -> None:
+    engine = FakeEngine()
+    client = make_client(engine, wrapping="Q: {text}")
+    assert client.post("/embed", json={"inputs": ["one", "two"]}).status_code == 200
+    assert engine.calls == [["Q: one", "Q: two"]]
+
+
+def test_no_wrapping_by_default_passes_text_through_byte_for_byte() -> None:
+    # Regression guard for every deployment that never sets wrapping: the
+    # bytes the caller sent are the bytes the model sees.
+    engine = FakeEngine()
+    client = make_client(engine)
+    texts = ["hello world", "  leading and trailing  ", "{text}", "café — emdash", ""]
+    assert client.post("/v1/embeddings", json={"input": texts, "model": "m"}).status_code == 200
+    assert engine.calls == [texts]
+    for sent, received in zip(texts, engine.calls[0], strict=True):
+        assert received.encode() == sent.encode()
+
+
+def test_wrapping_is_counted_in_usage_prompt_tokens() -> None:
+    # The length function is word count, not len: usage must be measured on
+    # the wrapped string, because the same value drives the token budgets
+    # the scheduler batches against.
+    engine = WordCountingEngine()
+    client = make_client(engine, wrapping="Question: {text}\nAnswer:")
+    texts = ["hello world", "a b c"]
+    body = client.post("/v1/embeddings", json={"input": texts, "model": "m"}).json()
+    # "Question: hello world\nAnswer:" is 4 words, "Question: a b c\nAnswer:"
+    # is 5; the unwrapped inputs are 2 and 3.
+    wrapped = 9
+    assert body["usage"] == {"prompt_tokens": wrapped, "total_tokens": wrapped}
+    assert body["usage"]["prompt_tokens"] != sum(len(text.split()) for text in texts)
+
+
+def test_info_reports_wrapping_template() -> None:
+    body = make_client(wrapping="Q: {text}").get("/info").json()
+    assert body["wrapping"] == "Q: {text}"
+
+
+def test_info_reports_null_wrapping_when_unset() -> None:
+    assert make_client().get("/info").json()["wrapping"] is None

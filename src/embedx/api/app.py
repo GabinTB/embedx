@@ -96,11 +96,12 @@ def create_app(settings: Settings, engine: Engine) -> FastAPI:
     # A wrong pooling produces plausible garbage with no error anywhere
     # else, so the choice is logged where it cannot be missed.
     logger.info(
-        "embedx serving model=%s pooling=%s normalize=%s dtype=%s",
+        "embedx serving model=%s pooling=%s normalize=%s dtype=%s wrapping=%r",
         settings.model_id,
         settings.pooling.value,
         settings.normalize,
         settings.dtype.value,
+        settings.wrapping,
     )
     if settings.is_exposed_without_auth:
         logger.warning(settings.exposure_warning())
@@ -127,7 +128,14 @@ def create_app(settings: Settings, engine: Engine) -> FastAPI:
                     f"max_request_items={settings.max_request_items}"
                 ),
             )
-        return texts
+        # Wrapping happens here, at the boundary, so that everything
+        # downstream sees the final string: length_fn feeds both the
+        # per-device token budgets and usage.prompt_tokens, and measuring
+        # the caller's raw input would under-count both. Unset wrapping
+        # returns the same list object untouched.
+        if settings.wrapping is None:
+            return texts
+        return [settings.wrap(text) for text in texts]
 
     @app.post("/v1/embeddings", dependencies=[Depends(require_auth)])
     async def embeddings(request: EmbeddingsRequest) -> EmbeddingsResponse:
@@ -181,6 +189,9 @@ def create_app(settings: Settings, engine: Engine) -> FastAPI:
             "pooling": settings.pooling.value,
             "normalize": settings.normalize,
             "dtype": settings.dtype.value,
+            # Verbatim, so a caller can see exactly what is prepended to
+            # their text without reading the server's configuration.
+            "wrapping": settings.wrapping,
             "version": __version__,
             "devices": [
                 {
