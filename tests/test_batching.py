@@ -169,6 +169,12 @@ def test_pack_count_validates_step_and_budget() -> None:
         pack_count([1], 0, 1, 1, 0)
 
 
+@pytest.mark.parametrize("max_items", [0, -2])
+def test_pack_count_validates_max_items(max_items: int) -> None:
+    with pytest.raises(ValueError, match="max_items"):
+        pack_count([1], 0, 1, 1, 5, max_items=max_items)
+
+
 def test_pack_count_matches_make_batches_boundaries() -> None:
     rng = random.Random(7)
     for _ in range(100):

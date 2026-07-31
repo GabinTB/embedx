@@ -44,10 +44,12 @@ def pack_count(
         raise ValueError(f"step must be +1 or -1, got {step}")
     if budget <= 0:
         raise ValueError(f"budget must be > 0, got {budget}")
+    if max_items is not None and max_items <= 0:
+        raise ValueError(f"max_items must be > 0 when set, got {max_items}")
     span = (stop - start) * step
     if span <= 0:
         return 0
-    limit = span if max_items is None else max(1, min(span, max_items))
+    limit = span if max_items is None else min(span, max_items)
 
     if step == -1:
         head = lengths[start]
