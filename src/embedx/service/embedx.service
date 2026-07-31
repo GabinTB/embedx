@@ -1,0 +1,70 @@
+# embedx systemd unit. Shipped as package data; locate it with
+#   python -c "from importlib import resources; print(resources.files('embedx') / 'service' / 'embedx.service')"
+# then copy to /etc/systemd/system/embedx.service and edit the paths for
+# your host. Full walkthrough in DEPLOY.md.
+
+[Unit]
+Description=embedx heterogeneous multi-GPU text embedding server
+Wants=network-online.target
+After=network-online.target
+# Tailscale-bound deployments (EMBEDX_HOST set to the tailnet address):
+# the address does not exist until tailscaled is up, so order after it.
+#After=tailscaled.service
+#Wants=tailscaled.service
+
+[Service]
+Type=simple
+# Dedicated unprivileged account; create with:
+#   useradd --system --home-dir /var/lib/embedx --shell /usr/sbin/nologin embedx
+User=embedx
+Group=embedx
+EnvironmentFile=/etc/embedx/embedx.env
+# Keep model downloads out of the (inaccessible, see ProtectHome) home dir.
+Environment=HF_HOME=/var/lib/embedx/hf
+# Creates /var/lib/embedx owned by the service user at first start.
+StateDirectory=embedx
+# Fail fast on bad config or missing GPUs instead of crash-looping serve.
+ExecStartPre=/opt/embedx/.venv/bin/embedx check
+ExecStart=/opt/embedx/.venv/bin/embedx serve
+Restart=on-failure
+RestartSec=5
+# Generous on purpose: the first start may download several GB of model
+# weights into the HF cache before the server can bind. Do not "fix" a slow
+# first boot by shrinking this; pre-download instead (see DEPLOY.md).
+TimeoutStartSec=900
+
+# --- Hardening -------------------------------------------------------------
+# Two common hardening options are deliberately ABSENT. Do not add them:
+#   MemoryDenyWriteExecute breaks torch, which needs writable+executable
+#     mappings for its JIT and CUDA initialization.
+#   PrivateDevices hides /dev/nvidia*, so the service would find no GPU.
+#
+# The service never needs to gain privileges (no setuid re-escalation).
+NoNewPrivileges=yes
+# Whole OS read-only for the service; only the state dir (HF cache) writes.
+ProtectSystem=strict
+ReadWritePaths=/var/lib/embedx
+# No access to any user home directory.
+ProtectHome=yes
+# Private /tmp, invisible to and from other services.
+PrivateTmp=yes
+# /proc/sys, sysctl and friends are read-only.
+ProtectKernelTunables=yes
+# The service cannot modify cgroups.
+ProtectControlGroups=yes
+# Only the socket families the server actually uses (HTTP + local sockets).
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+# No personality(2) changes; nothing here emulates other architectures.
+LockPersonality=yes
+# Deny all device access except the NVIDIA nodes CUDA needs.
+DevicePolicy=closed
+DeviceAllow=/dev/nvidiactl rw
+DeviceAllow=/dev/nvidia-uvm rw
+DeviceAllow=/dev/nvidia-uvm-tools rw
+DeviceAllow=/dev/nvidia-modeset rw
+# One line per card; add /dev/nvidia2, /dev/nvidia3, ... to match the host.
+DeviceAllow=/dev/nvidia0 rw
+DeviceAllow=/dev/nvidia1 rw
+
+[Install]
+WantedBy=multi-user.target

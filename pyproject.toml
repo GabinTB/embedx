@@ -68,6 +68,21 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/embedx"]
+# Package data rides along with the package dir; force-include pins the
+# systemd unit explicitly so it cannot fall out of the wheel unnoticed
+# (tests resolve it through importlib.resources).
+[tool.hatch.build.targets.wheel.force-include]
+"src/embedx/service/embedx.service" = "embedx/service/embedx.service"
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "src",
+    "tests",
+    "DEPLOY.md",
+    "README.md",
+    "LICENSE",
+    "Makefile",
+]
 
 # ------------------------------------------------------------------------- #
 # Tooling
