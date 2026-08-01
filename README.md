@@ -1,7 +1,7 @@
 # embedx
 
-**One embedding model served across GPUs of different speed and memory — with
-no configured load ratio.** That is the one reason embedx exists: the mixed
+**Many embedding models, loaded on demand, served across GPUs of different
+speed and memory — with no configured load ratio.** That is the one reason embedx exists: the mixed
 box. [TEI](https://github.com/huggingface/text-embeddings-inference) runs one
 model per GPU and leaves the request sharding to you; vLLM's tensor
 parallelism assumes homogeneous devices. embedx assumes the opposite and
@@ -23,30 +23,43 @@ balances at runtime.
 ```bash
 uv venv && uv pip install "embedx[gpu]"      # needs an NVIDIA driver; see DEPLOY.md
 
-export EMBEDX_MODEL_ID=sentence-transformers/all-MiniLM-L6-v2
-export EMBEDX_POOLING=mean                    # required, never inferred
-embedx serve
+embedx serve                                 # starts with no model loaded
 ```
 
-Call it, OpenAI style:
+Name the model in the request. The first one to name it loads it, and
+`pooling` is required on that first load — it is never inferred, because the
+wrong choice returns plausible vectors that are silently wrong:
 
 ```bash
 curl http://127.0.0.1:8477/v1/embeddings \
   -H "Content-Type: application/json" \
-  -d '{"model": "all-MiniLM-L6-v2", "input": ["hello world", "a longer piece of text"]}'
+  -d '{"model": "sentence-transformers/all-MiniLM-L6-v2",
+       "pooling": "mean",
+       "input": ["hello world", "a longer piece of text"]}'
 ```
 
-Or with the OpenAI Python client:
+Every later request for that model can omit `pooling`; sending a *different*
+one returns 409 rather than quietly reloading or ignoring you. A model is
+unloaded once it has been idle for `EMBEDX_DEFAULT_KEEP_ALIVE_S`, and
+`keep_alive` in the request overrides that per model.
+
+With the OpenAI Python client (which has no field for `pooling`, so load the
+model once with curl, or use `extra_body`):
 
 ```python
 from openai import OpenAI
 
 client = OpenAI(base_url="http://127.0.0.1:8477/v1", api_key="unused-without-EMBEDX_API_KEY")
-vectors = client.embeddings.create(model="all-MiniLM-L6-v2", input=["hello world"])
+vectors = client.embeddings.create(
+    model="sentence-transformers/all-MiniLM-L6-v2",
+    input=["hello world"],
+    extra_body={"pooling": "mean"},
+)
 ```
 
-There is also a TEI-style `POST /embed` (bare vectors), `GET /health`, and
-`GET /info` (resolved config, device table, truncation counters).
+There is also a TEI-style `POST /embed` (bare vectors; `model` required,
+unlike TEI), `GET /health`, and `GET /info` (server config plus every
+resident model with its pooling, devices, idle time and truncation count).
 
 ## Measured results
 
@@ -145,12 +158,8 @@ drift:
 
 | Setting | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `EMBEDX_MODEL_ID` | str | **required** | Hugging Face model id or local path. |
 | `EMBEDX_REVISION` | str or None | None | Model revision: branch, tag, or commit. |
-| `EMBEDX_POOLING` | cls / mean / last_token | **required** | Pooling strategy. Required on purpose: a wrong pooling produces plausible garbage vectors, so it is never inferred. |
 | `EMBEDX_NORMALIZE` | bool | True | L2-normalize embeddings after pooling. |
-| `EMBEDX_DTYPE` | auto / float32 / float16 / bfloat16 | 'auto' | Compute dtype; auto resolves by device capability (bf16/fp16/fp32). |
-| `EMBEDX_MAX_SEQ_LEN` | int or None | None | Max sequence length in tokens; longer inputs are truncated and counted. |
 | `EMBEDX_WRAPPING` | str or None | None | Template wrapping every input, e.g. "Q: {text}"; must contain '{text}' exactly once. Unset means inputs are passed through untouched. |
 | `EMBEDX_HOST` | str | '127.0.0.1' | Bind address; loopback by default. |
 | `EMBEDX_PORT` | int | 8477 | Bind port (1024-65535). |
@@ -163,10 +172,17 @@ drift:
 | `EMBEDX_MAX_BATCH_ITEMS` | int or None | None | Per-batch item-count cap (bounds zero-cost batches). |
 | `EMBEDX_DEVICE_WEIGHTS` | dict[int, float] | {} | Per-device speed-weight overrides, e.g. "0=1.0,1=0.35". |
 | `EMBEDX_DEVICE_BATCH_TOKENS` | dict[int, int] | {} | Per-device token-budget overrides, e.g. "0=16384,1=4096". |
+| `EMBEDX_DEFAULT_KEEP_ALIVE_S` | float | 600.0 | Seconds an idle model stays resident before it is unloaded. |
+| `EMBEDX_MAX_LOADED_MODELS` | int or None | None | Max models resident at once; unset means no cap. At the cap, a new load evicts the least-recently-used model that no request is using, rather than refusing; if every resident model is in use, the load fails instead. |
 
-`embedx check` preflights the configuration and device availability (exit
-code for systemd); `embedx info` prints the resolved config and ranked device
-table without loading a model.
+There is no `EMBEDX_MODEL_ID` or `EMBEDX_POOLING`: a server is configured
+without naming a checkpoint, and every request carries its own `model`.
+
+`embedx check` preflights configuration and device availability (exit code
+for systemd); `embedx check --warm <model_id> --warm-pooling <pooling>` also
+loads that model once and unloads it, as an end-to-end preflight that leaves
+nothing resident. `embedx info` prints the resolved config and ranked device
+table without loading anything.
 
 ## Deployment
 
@@ -184,8 +200,11 @@ Stated up front rather than discovered:
   (`list[int]`) with an explicit error; send text.
 - **`usage` counts tokens with the model's own tokenizer** (clamped at
   `max_seq_len`), which will not match OpenAI's tokenizers.
-- **One model per server instance.** Run one embedx per model, on different
-  ports.
+- **Weights must be safetensors.** A server that loads whatever a request
+  names cannot also run pickle deserialization; a checkpoint without
+  safetensors is refused, and so is one whose format cannot be checked.
+- **A cold load blocks the request that triggered it.** There is no
+  asynchronous pull endpoint yet.
 
 ## License
 

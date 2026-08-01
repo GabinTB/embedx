@@ -41,16 +41,17 @@ sudo mkdir -p /etc/embedx
 
 ## The env file
 
-The unit reads `/etc/embedx/embedx.env`. Two variables are **required** —
-there are no defaults for them, and pooling is deliberately never inferred
-(a wrong pooling produces plausible garbage vectors with no error):
+The unit reads `/etc/embedx/embedx.env`. **Nothing is required.** A server is
+configured without naming a checkpoint: models are named per request and
+loaded on demand. `EMBEDX_MODEL_ID` and `EMBEDX_POOLING` no longer exist. Leaving
+them here is a startup error rather than a no-op — deliberately, because the
+alternative is a server that starts fine while its operator believes it is
+still pinned to that model. Delete them, along with `EMBEDX_DTYPE` and
+`EMBEDX_MAX_SEQ_LEN`.
 
 ```bash
-# /etc/embedx/embedx.env
-EMBEDX_MODEL_ID=sentence-transformers/all-MiniLM-L6-v2
-EMBEDX_POOLING=mean                 # cls | mean | last_token
+# /etc/embedx/embedx.env — every line optional
 
-# Common optional settings:
 #EMBEDX_HOST=127.0.0.1              # default; see Binding below
 #EMBEDX_PORT=8477
 #EMBEDX_API_KEY=...                 # unset disables auth entirely
@@ -59,7 +60,47 @@ EMBEDX_POOLING=mean                 # cls | mean | last_token
 #EMBEDX_DEVICE_WEIGHTS=0=1.0,1=0.35
 #EMBEDX_DEVICE_BATCH_TOKENS=0=16384,1=4096
 #EMBEDX_LOG_LEVEL=INFO
+
+# Model residency:
+#EMBEDX_DEFAULT_KEEP_ALIVE_S=600    # idle seconds before a model is unloaded
+#EMBEDX_MAX_LOADED_MODELS=3         # unset = no cap
 ```
+
+`EMBEDX_DEFAULT_KEEP_ALIVE_S` is how long an idle model stays on the GPU
+before its memory is released. A request may override it per model with
+`keep_alive`, including `keep_alive: 0` to unload as soon as that request
+finishes. `EMBEDX_MAX_LOADED_MODELS` caps how many models are resident at
+once: at the cap, a new load evicts the least-recently-used model that no
+request is using. If every resident model is busy the new load fails with
+503 rather than pulling a model out from under a request in flight.
+
+## The safety floor
+
+Config-time validation used to guarantee that a running server had a
+deliberate pooling and a checkpoint someone had chosen by hand. Neither is
+true when any request can name any model, so the guarantees moved into the
+load path instead of disappearing:
+
+- **Pooling is required on a model's first load** and is never inferred. The
+  request that loads a model must carry `pooling`; without it the load is
+  refused with 400. The resolution is logged at WARNING, so which pooling a
+  model is serving under is in the journal.
+- **Pooling is conflict-checked afterwards.** A later request naming the same
+  model with a *different* pooling gets 409. It is never silently reapplied
+  (wrong vectors for that caller), never silently ignored, and never triggers
+  a reload (wrong vectors for everyone else mid-flight).
+- **Weights must be safetensors.** A server that loads whatever a request
+  names cannot also run pickle deserialization, which executes code. A
+  checkpoint whose only weights are `.bin`/`.pt` is refused with 400, before
+  anything is handed to torch.
+- **The format check fails closed.** If the file listing cannot be obtained
+  at all — hub unreachable and nothing cached — the load is refused with 503
+  rather than proceeding unchecked. A model already in the local HF cache is
+  verified against the cache, so an air-gapped host still serves what it has.
+
+No allowlist: any hub id or local path a request names may be loaded. If that
+is not acceptable for your deployment, keep the server behind an API key and
+a trusted network — see Binding and The API key below.
 
 Permissions: the file can carry the API key, so keep it `0600` owned by
 root — systemd (running as root) reads `EnvironmentFile=` before dropping to
@@ -112,12 +153,41 @@ You want to see, in order:
   preflight; if this fails the unit stops before crash-looping serve),
 - `binding http://<host>:<port>`,
 - `api key: set` (or `not set (open access)` — see Binding),
-- `pooling=... dtype=... normalize=...` — verify the pooling is the one your
-  model needs,
-- one `device N: <name> (weight ..., max_batch_tokens ...)` line per card.
+- `normalize=... wrapping=... default_keep_alive_s=... max_loaded_models=...`,
+- one `device N: <name> (weight ..., max_batch_tokens ...)` line per card,
+- `no models loaded; each is loaded on the first request that names it`.
 
-The first start may sit in `activating` for minutes while model weights
-download (this is why the unit sets `TimeoutStartSec=900`).
+Startup is now fast: nothing is downloaded or loaded until a request names a
+model. The wait moved to that first request, which blocks while the model
+downloads and loads — `TimeoutStartSec=900` in the unit no longer covers it,
+so give your first client a generous timeout instead.
+
+Pooling is *not* in the startup log any more, because no model is loaded yet.
+It appears at WARNING when each model is first loaded:
+
+```
+pooling for <model> resolved to mean on first load (dtype=..., device(s) [0, 1]);
+later requests naming a different pooling will be refused
+```
+
+That line is the one to check when a model returns vectors that seem wrong.
+
+### Preflighting a specific model
+
+`ExecStartPre` runs `embedx check`, which validates config and devices but
+loads nothing. To also prove a specific model loads on this box — weights
+reachable, format accepted, fits in VRAM — add `--warm`:
+
+```ini
+ExecStartPre=/usr/local/bin/embedx check --warm sentence-transformers/all-MiniLM-L6-v2 --warm-pooling mean
+```
+
+It loads the model, embeds one string, unloads it, and leaves nothing
+resident, so the server still starts empty. `--warm-pooling` is required with
+`--warm` for the same reason it is required on a first load: pooling is never
+inferred. Note this makes startup pay the download/load cost, which is
+exactly what `TimeoutStartSec=900` is for — use it if you would rather find
+out at boot than on the first request.
 
 ## Binding
 
@@ -172,7 +242,7 @@ Both can share a host; two things to know:
 
 ## CPU fallback
 
-There is none. `build_engine` requires at least one CUDA device and raises
+There is none. `embedx serve` requires at least one CUDA device and fails
 with a clear error otherwise; `embedx check` exits non-zero on a GPU-less
 host. If you need CPU embedding, use a different tool — do not deploy this
 expecting a silent CPU mode.

@@ -19,6 +19,20 @@ runner = CliRunner()
 GIB = 2**30
 
 
+class FakeRegistry:
+    """Registry double for serve: starts, stops, loads nothing."""
+
+    def start(self) -> None: ...
+
+    def stop(self, timeout: float = 5.0) -> None: ...
+
+    def evict_all(self) -> list[str]:
+        return []
+
+    def list_loaded(self) -> list[Any]:
+        return []
+
+
 class FakeEngine:
     def __init__(self) -> None:
         self.inner = FakeBackend(dim=8)
@@ -102,11 +116,12 @@ def test_hardening_block_present_with_device_allowlist() -> None:
 
 @pytest.fixture()
 def quiet_serve(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(cli, "build_engine", lambda settings: FakeEngine())
+    monkeypatch.setattr(cli, "_ranked_devices", lambda settings: [])
+    monkeypatch.setattr(cli, "_build_registry", lambda settings, ranked: FakeRegistry())
     monkeypatch.setattr(cli, "_run_uvicorn", lambda application, settings: None)
 
 
-BASE_ARGS = ["--model-id", "test-model", "--pooling", "mean"]
+BASE_ARGS: list[str] = []
 
 
 def test_serve_preflight_warns_on_exposed_bind(

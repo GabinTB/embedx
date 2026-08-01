@@ -18,9 +18,7 @@ GIB = 2**30
 
 
 def make_settings(**overrides: object) -> Settings:
-    kwargs: dict[str, object] = {"model_id": "test-model", "pooling": "mean"}
-    kwargs.update(overrides)
-    return Settings(**kwargs)  # type: ignore[arg-type]
+    return Settings(**overrides)  # type: ignore[arg-type]
 
 
 def make_device(index: int) -> DeviceInfo:

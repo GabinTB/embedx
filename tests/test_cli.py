@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Any
 
 import numpy as np
@@ -11,13 +13,14 @@ from typer.testing import CliRunner
 
 import embedx.cli as cli
 from embedx.backend import FakeBackend
-from embedx.config import Settings
+from embedx.config import Pooling, Settings
 from embedx.gpu.discovery import DeviceInfo
 
 runner = CliRunner()
 GIB = 2**30
 
-BASE_ARGS = ["--model-id", "test-model", "--pooling", "mean"]
+# No model arguments any more: a server is started without naming one.
+BASE_ARGS: list[str] = []
 
 
 def make_device(index: int, name: str = "Fake GPU") -> DeviceInfo:
@@ -42,6 +45,37 @@ class FakeEngine:
         return [(make_device(0), 16384)]
 
 
+class FakeRegistry:
+    """Registry double: records what was warmed, loads nothing real."""
+
+    def __init__(self, settings: Settings | None = None) -> None:
+        self.settings = settings
+        self.warmed: list[tuple[str, Any]] = []
+        self.resident: list[Any] = []
+        self.started = False
+        self.stopped = False
+        self.evicted = False
+
+    @contextmanager
+    def acquire(self, model_id: str, pooling: Any = None, **kwargs: Any) -> Iterator[FakeEngine]:
+        self.warmed.append((model_id, pooling))
+        self.kwargs = kwargs
+        yield FakeEngine()
+
+    def list_loaded(self) -> list[Any]:
+        return list(self.resident)
+
+    def start(self) -> None:
+        self.started = True
+
+    def stop(self, timeout: float = 5.0) -> None:
+        self.stopped = True
+
+    def evict_all(self) -> list[str]:
+        self.evicted = True
+        return []
+
+
 def output_of(result: Any) -> str:
     # click >= 8.2 separates stderr; older versions mix it into output.
     try:
@@ -52,19 +86,22 @@ def output_of(result: Any) -> str:
 
 @pytest.fixture()
 def serve_capture(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
-    """Neutralize engine build + uvicorn; capture what serve resolves."""
+    """Neutralize device discovery, registry and uvicorn; capture settings."""
     captured: dict[str, Any] = {}
 
-    def fake_build_engine(settings: Settings) -> FakeEngine:
+    def fake_registry(settings: Settings, ranked: Any) -> FakeRegistry:
         captured["build_settings"] = settings
-        return FakeEngine()
+        registry = FakeRegistry(settings)
+        captured["registry"] = registry
+        return registry
 
     def fake_run_uvicorn(application: Any, settings: Settings) -> None:
         captured["application"] = application
         captured["host"] = settings.host
         captured["port"] = settings.port
 
-    monkeypatch.setattr(cli, "build_engine", fake_build_engine)
+    monkeypatch.setattr(cli, "_ranked_devices", lambda settings: [make_device(0)])
+    monkeypatch.setattr(cli, "_build_registry", fake_registry)
     monkeypatch.setattr(cli, "_run_uvicorn", fake_run_uvicorn)
     return captured
 
@@ -77,8 +114,6 @@ def serve_capture(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
 def test_env_port_wins_when_cli_option_not_passed(
     monkeypatch: pytest.MonkeyPatch, serve_capture: dict[str, Any]
 ) -> None:
-    monkeypatch.setenv("EMBEDX_MODEL_ID", "env-model")
-    monkeypatch.setenv("EMBEDX_POOLING", "mean")
     monkeypatch.setenv("EMBEDX_PORT", "9005")
 
     result = runner.invoke(cli.app, ["serve"])
@@ -105,7 +140,10 @@ def test_serve_wires_engine_app_and_uvicorn(serve_capture: dict[str, Any]) -> No
     assert isinstance(serve_capture["application"], FastAPI)
     assert serve_capture["host"] == "127.0.0.1"
     assert serve_capture["port"] == 9100
-    assert serve_capture["build_settings"].model_id == "test-model"
+    # Nothing is loaded at startup; the registry is built and started empty.
+    registry = serve_capture["registry"]
+    assert registry.started is True
+    assert registry.list_loaded() == []
 
 
 def test_api_key_never_appears_in_output_or_logs(
@@ -132,11 +170,16 @@ def test_info_prints_device_table_and_budgets(monkeypatch: pytest.MonkeyPatch) -
     result = runner.invoke(cli.app, ["info", *BASE_ARGS, "--max-batch-tokens", "16384"])
     assert result.exit_code == 0, output_of(result)
     out = output_of(result)
-    assert "model_id:          test-model" in out
-    assert "pooling:           mean" in out
     assert "Fake GPU 0" in out
     assert "Fake GPU 1" in out
     assert "max_batch_tokens=16384" in out
+    # Removed fields must not linger in the output.
+    assert "model_id" not in out
+    assert "pooling:" not in out
+    # A fresh `info` process is not the server; its empty list must not be
+    # readable as "the running server has nothing loaded".
+    assert "not the running server" in out
+    assert "none - this command loads nothing" in out
 
 
 def test_info_without_cuda_exits_zero_and_says_so(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -176,10 +219,10 @@ def test_check_fails_on_no_devices(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_check_fails_on_invalid_config() -> None:
-    # Pooling given, model_id missing entirely: the cause must be named.
-    result = runner.invoke(cli.app, ["check", "--pooling", "mean"])
+    # A value that fails validation must name the field it came from.
+    result = runner.invoke(cli.app, ["check", "--default-keep-alive-s", "0"])
     assert result.exit_code == 2
-    assert "model_id" in output_of(result)
+    assert "default_keep_alive_s" in output_of(result)
 
 
 def test_check_exposure_is_warning_not_failure(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -204,3 +247,82 @@ def test_invalid_log_level_fails_listing_valid_levels() -> None:
     assert "CHATTY" in out
     for level in ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"):
         assert level in out
+
+
+# --------------------------------------------------------------------------- #
+# check --warm
+# --------------------------------------------------------------------------- #
+
+
+@pytest.fixture()
+def warm_capture(monkeypatch: pytest.MonkeyPatch) -> FakeRegistry:
+    registry = FakeRegistry()
+    monkeypatch.setattr(cli, "_ranked_devices", lambda settings: [make_device(0)])
+    monkeypatch.setattr(cli, "_build_registry", lambda settings, ranked: registry)
+    return registry
+
+
+def test_check_without_warm_loads_nothing(warm_capture: FakeRegistry) -> None:
+    result = runner.invoke(cli.app, ["check"])
+    assert result.exit_code == 0, output_of(result)
+    assert warm_capture.warmed == []
+    assert "check ok" in output_of(result)
+
+
+def test_check_warm_loads_then_leaves_nothing_resident(warm_capture: FakeRegistry) -> None:
+    result = runner.invoke(cli.app, ["check", "--warm", "org/model", "--warm-pooling", "mean"])
+    assert result.exit_code == 0, output_of(result)
+    assert warm_capture.warmed == [("org/model", Pooling.MEAN)]
+    # keep_alive=0 is what makes this a load-then-evict rather than a load.
+    assert warm_capture.kwargs["keep_alive"] == 0
+    assert warm_capture.list_loaded() == []
+    out = output_of(result)
+    assert "warm ok" in out and "nothing left resident" in out
+
+
+def test_check_warm_fails_if_the_model_stays_resident(
+    warm_capture: FakeRegistry, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # If the keep_alive=0 contract ever broke, a preflight that silently
+    # left a model on the GPU would be worse than one that failed.
+    warm_capture.resident = ["org/model"]
+    result = runner.invoke(cli.app, ["check", "--warm", "org/model", "--warm-pooling", "mean"])
+    assert result.exit_code == 1
+    assert "still resident" in output_of(result)
+    assert warm_capture.evicted is True
+
+
+def test_warm_without_pooling_is_refused_and_explains_why(
+    warm_capture: FakeRegistry,
+) -> None:
+    result = runner.invoke(cli.app, ["check", "--warm", "org/model"])
+    assert result.exit_code == 2
+    out = output_of(result)
+    assert "--warm-pooling" in out
+    assert "never inferred" in out
+    assert warm_capture.warmed == [], "nothing may load without a pooling"
+
+
+def test_warm_pooling_without_warm_is_refused(warm_capture: FakeRegistry) -> None:
+    result = runner.invoke(cli.app, ["check", "--warm-pooling", "mean"])
+    assert result.exit_code == 2
+    assert "only means something with --warm" in output_of(result)
+
+
+def test_check_warm_reports_a_load_failure_as_a_failed_check(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from embedx.registry import UnsupportedWeightFormatError
+
+    class RefusingRegistry(FakeRegistry):
+        @contextmanager
+        def acquire(self, model_id: str, pooling: Any = None, **kwargs: Any) -> Iterator[Any]:
+            raise UnsupportedWeightFormatError(model_id, ["pytorch_model.bin"])
+            yield  # pragma: no cover - unreachable, keeps this a generator
+
+    monkeypatch.setattr(cli, "_ranked_devices", lambda settings: [make_device(0)])
+    monkeypatch.setattr(cli, "_build_registry", lambda settings, ranked: RefusingRegistry())
+    result = runner.invoke(cli.app, ["check", "--warm", "org/bad", "--warm-pooling", "mean"])
+    assert result.exit_code == 1
+    out = output_of(result)
+    assert "check failed" in out and "pytorch_model.bin" in out

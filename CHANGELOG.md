@@ -4,6 +4,79 @@ All notable changes to this project are documented in this file. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed — BREAKING
+
+embedx serves many models, loaded on demand, instead of one chosen at
+startup. A server is now configured without naming a checkpoint.
+
+- **Removed from `Settings`:** `model_id`, `pooling`, `dtype`,
+  `max_seq_len`, and therefore `EMBEDX_MODEL_ID`, `EMBEDX_POOLING`,
+  `EMBEDX_DTYPE` and `EMBEDX_MAX_SEQ_LEN`. They are per-request fields now:
+  `model` (required), and optional `pooling` / `dtype` / `max_seq_len`,
+  which apply on a model's first load only. Setting the old variables is a
+  startup error, not a no-op: pydantic-settings would otherwise ignore an
+  `EMBEDX_*` variable matching no field, and a box whose env file still
+  pinned `EMBEDX_MODEL_ID` would start happily while its operator believed
+  it was pinned. Delete them.
+- **`model` in a request is a routing key, not a label.** Naming a model
+  the server has not loaded loads it, and the request blocks until that
+  finishes. There is no asynchronous pull endpoint yet.
+- **`pooling` is required on a model's first load** and refused with 400 if
+  absent; a later request naming the same model with a different pooling
+  gets 409. The rule that pooling is never inferred did not go away, it
+  moved from configuration time to load time.
+- **`POST /embed` now requires `model`.** TEI has no such field, but embedx
+  has no configured model to fall back to.
+- **`GET /info` is per-model:** server-wide config plus one entry per
+  resident model (pooling, dtype, devices, idle time, in-flight references,
+  truncation count). Zero loaded models is an empty list, not an error.
+- **`embedx serve` starts with nothing loaded** and no longer builds an
+  engine eagerly; `build_engine` is gone.
+- **`embedx check` no longer preflights a model.** `--warm <model_id>`
+  with `--warm-pooling` does a real load-and-unload cycle instead, leaving
+  nothing resident.
+- CLI options `--model-id`, `--pooling`, `--dtype` and `--max-seq-len` are
+  removed from `serve`, `info` and `check`.
+
+### Added
+
+- On-demand model registry with per-model-id load locking, device-by-device
+  placement, reference-counted eviction safety and a TTL reaper.
+- `EMBEDX_DEFAULT_KEEP_ALIVE_S` (default 600s): idle seconds before a model
+  is unloaded. Overridable per request with `keep_alive`; `keep_alive: 0`
+  unloads as soon as the request finishes.
+- `EMBEDX_MAX_LOADED_MODELS` (default unset, no cap): at the cap, a new load
+  evicts the least-recently-used model that no request is using; if every
+  resident model is in use the load fails with 503 rather than evicting one
+  mid-request.
+- Dynamically loaded weights must be safetensors. A pickle-only checkpoint
+  is refused with 400; a checkpoint whose format cannot be verified at all
+  is refused with 503, after falling back to the local HF cache so an
+  air-gapped host still serves what it has already downloaded.
+- `EMBEDX_WRAPPING`: a template applied to every input, e.g. `"Q: {text}"`.
+
+### Migration
+
+```diff
+  # /etc/embedx/embedx.env
+- EMBEDX_MODEL_ID=sentence-transformers/all-MiniLM-L6-v2
+- EMBEDX_POOLING=mean
++ # nothing required; models are named per request
+```
+
+```diff
+  {
+-   "model": "all-MiniLM-L6-v2",
++   "model": "sentence-transformers/all-MiniLM-L6-v2",
++   "pooling": "mean",
+    "input": ["hello world"]
+  }
+```
+
+`pooling` is needed only on the request that first loads a given model.
+
 ## [0.1.0] - 2026-07-31
 
 ### Added

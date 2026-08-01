@@ -9,15 +9,13 @@ import pytest
 from pydantic import ValidationError
 from pydantic_settings import SettingsError
 
-from embedx.config import Dtype, Pooling, Settings
+from embedx.config import DEFAULT_KEEP_ALIVE_S, Settings
 
 # Env isolation for these tests lives in conftest.py (_clean_embedx_env).
 
 
 def make_settings(**overrides: object) -> Settings:
-    kwargs: dict[str, object] = {"model_id": "test-model", "pooling": "mean"}
-    kwargs.update(overrides)
-    return Settings(**kwargs)  # type: ignore[arg-type]
+    return Settings(**overrides)  # type: ignore[arg-type]
 
 
 # --------------------------------------------------------------------------- #
@@ -27,67 +25,71 @@ def make_settings(**overrides: object) -> Settings:
 
 def test_precedence_cli_over_env_over_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     config = tmp_path / "embedx.toml"
-    config.write_text('model_id = "from-file"\npooling = "cls"\nport = 9001\n')
+    config.write_text('host = "10.0.0.1"\nlog_level = "DEBUG"\nport = 9001\n')
     monkeypatch.setenv("EMBEDX_CONFIG", str(config))
 
     # File only.
     settings = Settings()
-    assert settings.model_id == "from-file"
+    assert settings.host == "10.0.0.1"
     assert settings.port == 9001
-    assert settings.pooling is Pooling.CLS
+    assert settings.log_level == "DEBUG"
 
     # Env beats file.
-    monkeypatch.setenv("EMBEDX_MODEL_ID", "from-env")
+    monkeypatch.setenv("EMBEDX_HOST", "10.0.0.2")
     monkeypatch.setenv("EMBEDX_PORT", "9002")
     settings = Settings()
-    assert settings.model_id == "from-env"
+    assert settings.host == "10.0.0.2"
     assert settings.port == 9002
 
     # Init kwarg (the CLI path) beats env; unset keys still fall through.
-    settings = Settings(model_id="from-init", port=9003)
-    assert settings.model_id == "from-init"
+    settings = Settings(host="10.0.0.3", port=9003)
+    assert settings.host == "10.0.0.3"
     assert settings.port == 9003
-    assert settings.pooling is Pooling.CLS  # from file
-    assert settings.dtype is Dtype.AUTO  # default
+    assert settings.log_level == "DEBUG"  # from file
+    assert settings.normalize is True  # default
 
 
 def test_absent_config_env_var_is_not_an_error() -> None:
-    assert make_settings().model_id == "test-model"
+    assert make_settings().port == 8477
 
 
 def test_nonexistent_config_path_is_empty_source(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("EMBEDX_CONFIG", "/definitely/not/a/real/path.toml")
-    assert make_settings().model_id == "test-model"
+    assert make_settings().port == 8477
 
 
 def test_malformed_config_file_names_the_path(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     config = tmp_path / "broken.toml"
-    config.write_text("model_id = [unclosed\n")
+    config.write_text("port = [unclosed\n")
     monkeypatch.setenv("EMBEDX_CONFIG", str(config))
     with pytest.raises(SettingsError, match=re.escape(str(config))):
         Settings()
 
 
 # --------------------------------------------------------------------------- #
-# Required fields
+# No required fields: a server is configured without naming a checkpoint
 # --------------------------------------------------------------------------- #
 
 
-def test_missing_model_id_names_the_field() -> None:
-    with pytest.raises(ValidationError, match="model_id"):
-        Settings(pooling="mean")  # type: ignore[call-arg]
+def test_settings_construct_with_nothing_set() -> None:
+    # Replaces the task-05 tests that asserted model_id and pooling were
+    # required. They are not fields any more: `model` is per request, and
+    # pooling is required on a model's FIRST LOAD (registry), not at
+    # configuration time. The rule moved; it did not go away.
+    settings = Settings()
+    assert settings.port == 8477
+    assert settings.normalize is True
 
 
-def test_empty_model_id_rejected() -> None:
-    with pytest.raises(ValidationError, match="model_id"):
-        make_settings(model_id="")
-
-
-def test_missing_pooling_explains_why_it_is_never_inferred() -> None:
-    with pytest.raises(ValidationError, match="never inferred"):
-        Settings(model_id="m")  # type: ignore[call-arg]
+@pytest.mark.parametrize("removed", ["model_id", "pooling", "dtype", "max_seq_len"])
+def test_single_model_fields_are_gone_and_rejected(removed: str) -> None:
+    assert removed not in Settings.model_fields
+    # extra="forbid" turns a stale env-file or deployment into a loud
+    # failure rather than a silently ignored setting.
+    with pytest.raises(ValidationError):
+        Settings(**{removed: "mean"})  # type: ignore[arg-type]
 
 
 # --------------------------------------------------------------------------- #
@@ -209,7 +211,8 @@ def test_exposure_warning_names_the_bind_address() -> None:
         {"max_batch_items": 0},
         {"max_request_items": 0},
         {"max_request_bytes": -1},
-        {"max_seq_len": 0},
+        {"default_keep_alive_s": 0},
+        {"max_loaded_models": 0},
     ],
 )
 def test_out_of_bounds_values_rejected(overrides: dict[str, int]) -> None:
@@ -218,10 +221,10 @@ def test_out_of_bounds_values_rejected(overrides: dict[str, int]) -> None:
 
 
 def test_valid_bounds_accepted() -> None:
-    settings = make_settings(port=1024, max_seq_len=512, max_batch_items=32)
+    settings = make_settings(port=1024, max_batch_items=32, default_keep_alive_s=30)
     assert settings.port == 1024
-    assert settings.max_seq_len == 512
     assert settings.max_batch_items == 32
+    assert settings.default_keep_alive_s == 30
 
 
 def test_settings_are_frozen_and_reject_unknown_fields() -> None:
@@ -286,3 +289,86 @@ def test_wrapping_escaped_placeholder_is_rejected() -> None:
 def test_wrapping_from_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("EMBEDX_WRAPPING", "passage: {text}")
     assert make_settings().wrapping == "passage: {text}"
+
+
+# --------------------------------------------------------------------------- #
+# Model residency
+# --------------------------------------------------------------------------- #
+
+
+def test_default_keep_alive_has_a_positive_default() -> None:
+    assert make_settings().default_keep_alive_s == DEFAULT_KEEP_ALIVE_S
+    assert DEFAULT_KEEP_ALIVE_S > 0
+
+
+@pytest.mark.parametrize("value", [0, -1, -0.5])
+def test_default_keep_alive_must_be_positive(value: float) -> None:
+    # Zero here would mean every model unloads the instant its request
+    # finishes, i.e. a reload per request. Per-request keep_alive=0 asks for
+    # exactly that deliberately; the server-wide default must not.
+    with pytest.raises(ValidationError, match="default_keep_alive_s"):
+        make_settings(default_keep_alive_s=value)
+
+
+def test_default_keep_alive_accepts_a_float() -> None:
+    assert make_settings(default_keep_alive_s=90.5).default_keep_alive_s == 90.5
+
+
+def test_max_loaded_models_is_optional_and_unset_means_no_cap() -> None:
+    assert make_settings().max_loaded_models is None
+
+
+@pytest.mark.parametrize("value", [0, -1])
+def test_max_loaded_models_must_be_positive_when_set(value: int) -> None:
+    with pytest.raises(ValidationError, match="max_loaded_models"):
+        make_settings(max_loaded_models=value)
+
+
+def test_max_loaded_models_accepts_a_positive_cap() -> None:
+    assert make_settings(max_loaded_models=2).max_loaded_models == 2
+
+
+def test_residency_settings_come_from_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("EMBEDX_DEFAULT_KEEP_ALIVE_S", "45")
+    monkeypatch.setenv("EMBEDX_MAX_LOADED_MODELS", "4")
+    settings = make_settings()
+    assert settings.default_keep_alive_s == 45
+    assert settings.max_loaded_models == 4
+
+
+@pytest.mark.parametrize(
+    ("variable", "value"),
+    [
+        ("EMBEDX_MODEL_ID", "sentence-transformers/all-MiniLM-L6-v2"),
+        ("EMBEDX_POOLING", "mean"),
+        ("EMBEDX_DTYPE", "float16"),
+        ("EMBEDX_MAX_SEQ_LEN", "512"),
+    ],
+)
+def test_removed_env_vars_fail_loudly_instead_of_being_ignored(
+    monkeypatch: pytest.MonkeyPatch, variable: str, value: str
+) -> None:
+    # pydantic-settings ignores an EMBEDX_* variable matching no field, even
+    # with extra="forbid" — that silence is the migration hazard. An upgraded
+    # box whose env file still pins EMBEDX_MODEL_ID would start happily and
+    # serve whatever requests name, while its operator believed otherwise.
+    monkeypatch.setenv(variable, value)
+    with pytest.raises(ValidationError) as excinfo:
+        Settings()
+    message = str(excinfo.value)
+    assert variable in message
+    assert "removed" in message
+
+
+def test_removed_keys_in_a_config_file_are_also_rejected(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config = tmp_path / "embedx.toml"
+    config.write_text('model_id = "org/model"\n')
+    monkeypatch.setenv("EMBEDX_CONFIG", str(config))
+    with pytest.raises(ValidationError, match="model_id"):
+        Settings()
+
+
+def test_a_clean_environment_still_constructs() -> None:
+    assert Settings().port == 8477

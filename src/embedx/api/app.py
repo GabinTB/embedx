@@ -5,9 +5,8 @@ from __future__ import annotations
 import base64
 import logging
 import secrets
-import time
-from collections.abc import Callable, Iterator
-from contextlib import AbstractContextManager, contextmanager
+from collections.abc import Callable
+from contextlib import AbstractContextManager
 from typing import Annotated, Any, Protocol, TypeVar
 
 import numpy as np
@@ -28,7 +27,7 @@ from embedx.api.schemas import (
 from embedx.config import Dtype, Pooling, Settings
 from embedx.engine.engine import Engine
 from embedx.registry import (
-    DEFAULT_KEEP_ALIVE_S,
+    ModelCapacityError,
     ModelPlacementError,
     ModelStatus,
     PoolingConflictError,
@@ -62,6 +61,9 @@ _REGISTRY_ERROR_STATUS: tuple[tuple[type[RegistryError], int], ...] = (
     (WeightFormatUnverifiableError, 503),
     # The server cannot serve this model right now; the request was fine.
     (ModelPlacementError, 503),
+    # At the residency cap with every model busy. Administrative, not a
+    # hardware limit, and it clears as soon as a request finishes.
+    (ModelCapacityError, 503),
 )
 
 
@@ -82,58 +84,6 @@ class ModelSource(Protocol):
     ) -> AbstractContextManager[Engine]: ...
 
     def list_loaded(self) -> list[ModelStatus]: ...
-
-
-class _FixedModelSource:
-    """The 0.1.0 single-model path, behind the registry interface.
-
-    `serve` still builds one Engine eagerly and passes it here; task 15
-    deletes that call and this class with it. Until then this adapter
-    exists so the routes have exactly one shape instead of an
-    `if registry is not None` in every endpoint.
-
-    Behaviour matches 0.1.0: `model` was an echoed label, not a routing
-    key, so any model id is served by the one configured engine. A pooling
-    that disagrees with the configured one is the single exception — that
-    is conflict-checked, because answering with the wrong pooling is the
-    failure this project refuses to make quietly.
-    """
-
-    def __init__(self, settings: Settings, engine: Engine) -> None:
-        self._settings = settings
-        self._engine = engine
-        self._loaded_at = time.time()
-
-    @contextmanager
-    def acquire(
-        self,
-        model_id: str,
-        pooling: Pooling | None = None,
-        dtype: Dtype = Dtype.AUTO,
-        max_seq_len: int | None = None,
-        keep_alive: float | None = None,
-    ) -> Iterator[Engine]:
-        if pooling is not None and pooling is not self._settings.pooling:
-            raise PoolingConflictError(model_id, pooling, self._settings.pooling)
-        yield self._engine
-
-    def list_loaded(self) -> list[ModelStatus]:
-        return [
-            ModelStatus(
-                model_id=self._settings.model_id,
-                pooling=self._settings.pooling,
-                dtype=self._settings.dtype,
-                device_indices=tuple(
-                    device.index for device, _ in self._engine.devices_with_budgets
-                ),
-                # Never idle and never referenced: it is pinned for the
-                # process lifetime, not managed by a reaper.
-                idle_s=0.0,
-                last_used_epoch_s=self._loaded_at,
-                ref_count=0,
-                truncated_count=sum(self._engine.truncated_counts),
-            )
-        ]
 
 
 class _BodyLimitMiddleware:
@@ -192,34 +142,29 @@ class _BodyLimitMiddleware:
 _bearer = HTTPBearer(auto_error=False)
 
 
-def create_app(
-    settings: Settings,
-    engine: Engine | None = None,
-    *,
-    registry: ModelSource | None = None,
-) -> FastAPI:
+def create_app(settings: Settings, registry: ModelSource) -> FastAPI:
     """Build the HTTP layer over a model registry.
 
-    `registry` is the real path: models resolve per request and load on
-    demand, so it is constructible with nothing loaded. `engine` is the
-    0.1.0 single-model path that `serve` still uses until task 15 removes
-    it; passing one wraps it in `_FixedModelSource`. Exactly one is needed.
+    The registry is injected, and starts empty: nothing is loaded until a
+    request names a model. Tests pass a double.
     """
-    if (engine is None) == (registry is None):
-        raise ValueError("create_app needs exactly one of `engine` or `registry`")
-    source: ModelSource = registry if registry is not None else _FixedModelSource(settings, engine)  # type: ignore[arg-type]
+    source = registry
     app = FastAPI(title="embedx", version=__version__)
     install_error_handlers(app)
 
-    # A wrong pooling produces plausible garbage with no error anywhere
-    # else, so the choice is logged where it cannot be missed.
+    # No model is resident at startup, so there is no pooling or dtype to
+    # report here. Each model's pooling is logged at WARNING by the registry
+    # when it is first resolved; duplicating it here would only be a guess.
     logger.info(
-        "embedx serving model=%s pooling=%s normalize=%s dtype=%s wrapping=%r",
-        settings.model_id,
-        settings.pooling.value,
+        "embedx ready on %s:%d, no models loaded (api key %s, normalize=%s, "
+        "wrapping=%r, default_keep_alive_s=%s, max_loaded_models=%s)",
+        settings.host,
+        settings.port,
+        "set" if settings.api_key else "NOT set - open access",
         settings.normalize,
-        settings.dtype.value,
         settings.wrapping,
+        settings.default_keep_alive_s,
+        settings.max_loaded_models if settings.max_loaded_models is not None else "unlimited",
     )
     if settings.is_exposed_without_auth:
         logger.warning(settings.exposure_warning())
@@ -368,9 +313,8 @@ def create_app(
             # Verbatim, so a caller can see exactly what is prepended to
             # their text without reading the server's configuration.
             "wrapping": settings.wrapping,
-            # SPEC-GAP: hardcoded until task 15 adds
-            # Settings.default_keep_alive_s and threads the real value here.
-            "default_keep_alive_s": DEFAULT_KEEP_ALIVE_S,
+            "default_keep_alive_s": settings.default_keep_alive_s,
+            "max_loaded_models": settings.max_loaded_models,
             "models": [
                 {
                     "model_id": status.model_id,

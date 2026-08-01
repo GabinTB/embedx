@@ -140,16 +140,6 @@ def _fake_props(name: str, memory: int, sms: int, major: int, minor: int) -> Sim
     )
 
 
-def test_build_engine_without_cuda_raises_clearly(monkeypatch: pytest.MonkeyPatch) -> None:
-    from embedx.backend.factory import build_engine
-    from embedx.config import Settings
-
-    monkeypatch.setattr(discovery, "_import_torch", lambda: None)
-    settings = Settings(model_id="m", pooling="mean")  # type: ignore[call-arg]
-    with pytest.raises(RuntimeError, match="no CUDA device"):
-        build_engine(settings)
-
-
 def test_discover_without_torch_returns_empty(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(discovery, "_import_torch", lambda: None)
     assert discover_devices() == []

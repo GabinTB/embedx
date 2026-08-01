@@ -142,8 +142,8 @@ class HFBackend:
         self.truncated_count = 0
         self.dim: int = 0
         self.max_seq_length: int = 0
-        # The factory passes one cache shared by all devices (see
-        # build_engine); a private instance keeps direct construction working.
+        # The caller passes one cache shared by all of a model's devices (see
+        # the registry); a private instance keeps direct construction working.
         self._length_cache = length_cache if length_cache is not None else TokenLengthCache()
         self._tokenizer: Any = None
         self._st_model: Any = None

@@ -1,13 +1,13 @@
-"""Engine factory: device discovery → ranking → one HFBackend per device.
+"""Backend construction helpers, shared by whatever assembles an Engine.
 
-Importable without torch; the HFBackend import happens inside the small
-helpers below, which are the first point where torch is genuinely needed.
+Importable without torch; the HFBackend import happens inside the helpers
+below, which are the first point where torch is genuinely needed.
 
-`build_engine` is the single-model startup path. `ModelRegistry` (task 13)
-loads models on demand and must place each one device by device, so the
-pieces both need — a backend constructor, the per-model token-length cache,
-and the Engine wiring — live here as separate functions rather than being
-duplicated on the registry side.
+`build_engine`, the eager single-model startup path, is gone: `serve` now
+starts with nothing loaded and `ModelRegistry` places each model device by
+device on demand. What it needed survives here as separate functions — a
+backend constructor, the per-model token-length cache, and the Engine
+wiring — because the registry needs exactly those, one device at a time.
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ from typing import Any, Protocol
 from embedx.backend.base import EmbeddingBackend
 from embedx.config import Dtype, Pooling, Settings
 from embedx.engine.engine import Engine
-from embedx.gpu.discovery import DeviceInfo, discover_devices, rank_devices
+from embedx.gpu.discovery import DeviceInfo
 
 
 class BackendFactory(Protocol):
@@ -94,35 +94,3 @@ def engine_from_backends(
     """
     length_fn = getattr(backends[0], "length_fn", len)
     return Engine(backends, devices, settings, length_fn=length_fn)
-
-
-def build_engine(settings: Settings) -> Engine:
-    """Assemble the real engine: one full model copy per ranked device.
-
-    Data sharding, not model parallelism — every device holds the whole
-    model and the scheduler splits the inputs.
-    """
-    infos = discover_devices(settings.devices)
-    if not infos:
-        raise RuntimeError(
-            "no CUDA device found: embedx needs torch with CUDA available "
-            "(install the gpu extra on a CUDA host: uv sync --extra gpu); "
-            "CPU serving is not supported"
-        )
-    ranked = rank_devices(infos, settings.device_weights)
-
-    length_cache = new_length_cache()
-    backends = [
-        hf_backend_factory(
-            model_id=settings.model_id,
-            device_index=device.index,
-            pooling=settings.pooling,
-            normalize=settings.normalize,
-            dtype=settings.dtype,
-            max_seq_length=settings.max_seq_len,
-            revision=settings.revision,
-            length_cache=length_cache,
-        )
-        for device in ranked
-    ]
-    return engine_from_backends(backends, ranked, settings)

@@ -27,6 +27,29 @@ from pydantic_settings import (
 
 CONFIG_PATH_ENV_VAR = "EMBEDX_CONFIG"
 
+# Idle seconds before a model is unloaded. Ollama, the closest prior art for
+# keep-alive on a local model server, defaults to 5 minutes and documents
+# roughly 10-15 minutes as the sane range for keeping a model warm without
+# hoarding VRAM; 600s sits at the bottom of that range, which suits a box
+# whose GPUs are shared with other work. Task 17 recalibrates this against
+# measured load latency -- the right value is "long enough that a reload
+# costs less than the memory held", and that number is not yet measured.
+DEFAULT_KEEP_ALIVE_S = 600.0
+
+# Settings removed in the multi-model migration. `extra="forbid"` catches
+# these as init kwargs and as config-file keys, but NOT as environment
+# variables: pydantic-settings simply ignores an EMBEDX_* variable that
+# matches no field. That silence is the dangerous case -- an upgraded box
+# whose env file still pins EMBEDX_MODEL_ID starts happily and serves
+# whatever requests name, while its operator believes it is pinned. So the
+# variables are detected and rejected explicitly.
+_REMOVED_SETTINGS: dict[str, str] = {
+    "model_id": "send `model` in each request instead",
+    "pooling": "send `pooling` on a model's first request instead",
+    "dtype": "send `dtype` on a model's first request instead",
+    "max_seq_len": "send `max_seq_len` on a model's first request instead",
+}
+
 WRAPPING_PLACEHOLDER = "{text}"
 # Sentinel used only to prove the template really substitutes: a value no
 # plausible template contains literally.
@@ -127,26 +150,23 @@ class Settings(BaseSettings):
         extra="forbid",
     )
 
-    # Model. Field descriptions are user-facing: the README config table is
-    # rendered from them (tests/test_readme.py keeps it in sync).
-    model_id: str = Field(min_length=1, description="Hugging Face model id or local path.")
+    # Model handling. Field descriptions are user-facing: the README config
+    # table is rendered from them (tests/test_readme.py keeps it in sync).
+    #
+    # model_id / pooling / dtype / max_seq_len used to live here. They are
+    # per-request now (task 14), resolved once per model id on first load
+    # (task 13), because one server serves many checkpoints.
     revision: str | None = Field(
         default=None, description="Model revision: branch, tag, or commit."
     )
-    pooling: Pooling = Field(
-        description="Pooling strategy. Required on purpose: a wrong pooling produces "
-        "plausible garbage vectors, so it is never inferred."
-    )
+    # DELIBERATE, not an oversight: `normalize` and `revision` are arguably
+    # per-model properties, exactly like pooling. A caller asking for
+    # unnormalized vectors from one model and normalized from another cannot
+    # say so, and a server-wide `revision` pinned to one checkpoint's commit
+    # is close to meaningless across many. Both stay server-wide here because
+    # moving them is a request-schema change this task does not cover; they
+    # are the obvious candidates if per-model handling is revisited.
     normalize: bool = Field(default=True, description="L2-normalize embeddings after pooling.")
-    dtype: Dtype = Field(
-        default=Dtype.AUTO,
-        description="Compute dtype; auto resolves by device capability (bf16/fp16/fp32).",
-    )
-    max_seq_len: int | None = Field(
-        default=None,
-        gt=0,
-        description="Max sequence length in tokens; longer inputs are truncated and counted.",
-    )
     wrapping: str | None = Field(
         default=None,
         description='Template wrapping every input, e.g. "Q: {text}"; must contain '
@@ -188,6 +208,20 @@ class Settings(BaseSettings):
         description='Per-device token-budget overrides, e.g. "0=16384,1=4096".',
     )
 
+    # Model residency
+    default_keep_alive_s: float = Field(
+        default=DEFAULT_KEEP_ALIVE_S,
+        gt=0,
+        description="Seconds an idle model stays resident before it is unloaded.",
+    )
+    max_loaded_models: int | None = Field(
+        default=None,
+        gt=0,
+        description="Max models resident at once; unset means no cap. At the cap, a new "
+        "load evicts the least-recently-used model that no request is using, rather "
+        "than refusing; if every resident model is in use, the load fails instead.",
+    )
+
     @classmethod
     def settings_customise_sources(
         cls,
@@ -202,12 +236,19 @@ class Settings(BaseSettings):
 
     @model_validator(mode="before")
     @classmethod
-    def _require_pooling(cls, data: Any) -> Any:
-        if isinstance(data, dict) and not data.get("pooling"):
+    def _reject_removed_settings(cls, data: Any) -> Any:
+        found = [
+            (f"{cls.model_config.get('env_prefix', '')}{name}".upper(), advice)
+            for name, advice in _REMOVED_SETTINGS.items()
+            if f"{cls.model_config.get('env_prefix', '')}{name}".upper() in os.environ
+        ]
+        if found:
+            detail = "; ".join(f"{name} -> {advice}" for name, advice in found)
             raise ValueError(
-                "pooling is required and is never inferred: a wrong pooling produces "
-                "plausible but garbage vectors with no error. "
-                "Set pooling to one of: cls, mean, last_token."
+                "these settings were removed when embedx became multi-model, and are "
+                f"no longer read: {detail}. Remove them from the environment or env "
+                "file. Leaving them set would look like configuration that is being "
+                "honoured when it is being ignored."
             )
         return data
 

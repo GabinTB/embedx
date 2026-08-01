@@ -16,10 +16,11 @@ import numpy as np
 import pytest
 
 from embedx.backend import FakeBackend
-from embedx.config import Dtype, Pooling
+from embedx.config import Dtype, Pooling, Settings
 from embedx.gpu.discovery import DeviceInfo
 from embedx.registry import (
     DEFAULT_KEEP_ALIVE_S,
+    ModelCapacityError,
     ModelPlacementError,
     ModelRegistry,
     PoolingConflictError,
@@ -725,3 +726,99 @@ def test_status_truncation_is_zero_for_a_backend_without_the_counter() -> None:
     for backend in factory.created:
         del backend.truncated_count
     assert registry.list_loaded()[0].truncated_count == 0
+
+
+# --------------------------------------------------------------------------- #
+# max_loaded_models
+# --------------------------------------------------------------------------- #
+
+
+def capped_registry(cap: int) -> tuple[ModelRegistry, StubFactory]:
+    factory = StubFactory()
+    registry = ModelRegistry(
+        make_devices(2),
+        reaper_interval_s=0.01,
+        settings=Settings(max_loaded_models=cap),
+        backend_factory=factory,
+        weight_file_lister=safetensors_listing,
+    )
+    return registry, factory
+
+
+def test_no_cap_by_default() -> None:
+    registry, _ = make_registry()
+    for index in range(5):
+        registry.get_or_load(f"org/model-{index}", pooling=Pooling.MEAN)
+    assert len(registry.list_loaded()) == 5
+
+
+def test_loading_past_the_cap_evicts_the_least_recently_used() -> None:
+    registry, factory = capped_registry(2)
+    registry.get_or_load("org/first", pooling=Pooling.MEAN)
+    time.sleep(0.01)
+    registry.get_or_load("org/second", pooling=Pooling.MEAN)
+    assert sorted(s.model_id for s in registry.list_loaded()) == ["org/first", "org/second"]
+
+    # Touch the older one so the YOUNGER becomes least-recently-used: the
+    # rule is last use, not load order.
+    time.sleep(0.01)
+    registry.get_or_load("org/first")
+
+    registry.get_or_load("org/third", pooling=Pooling.MEAN)
+    assert sorted(s.model_id for s in registry.list_loaded()) == ["org/first", "org/third"]
+    # Evicted for real, not just dropped from the map.
+    evicted = [b for b in factory.created if b.model_id == "org/second"]
+    assert evicted and all(b.closed for b in evicted)
+
+
+def test_the_cap_never_evicts_a_model_that_is_in_use() -> None:
+    registry, _ = capped_registry(1)
+    with registry.acquire("org/busy", pooling=Pooling.MEAN):
+        with pytest.raises(ModelCapacityError) as excinfo:
+            registry.get_or_load("org/wants-in", pooling=Pooling.MEAN)
+        assert excinfo.value.resident == ["org/busy"]
+        assert excinfo.value.cap == 1
+        assert "org/wants-in" in str(excinfo.value)
+        # The in-flight model is untouched.
+        assert [s.model_id for s in registry.list_loaded()] == ["org/busy"]
+
+    # Released: the same load now succeeds by evicting it.
+    registry.get_or_load("org/wants-in", pooling=Pooling.MEAN)
+    assert [s.model_id for s in registry.list_loaded()] == ["org/wants-in"]
+
+
+def test_the_cap_evicts_only_unreferenced_models() -> None:
+    registry, _ = capped_registry(2)
+    registry.get_or_load("org/idle", pooling=Pooling.MEAN)
+    time.sleep(0.01)
+    with registry.acquire("org/busy", pooling=Pooling.MEAN):
+        # org/busy is the more recently used, but org/idle is the only
+        # candidate anyway: being unreferenced comes first.
+        registry.get_or_load("org/new", pooling=Pooling.MEAN)
+    assert sorted(s.model_id for s in registry.list_loaded()) == ["org/busy", "org/new"]
+
+
+def test_default_keep_alive_comes_from_settings() -> None:
+    factory = StubFactory()
+    registry = ModelRegistry(
+        make_devices(1),
+        settings=Settings(default_keep_alive_s=0.01),
+        backend_factory=factory,
+        weight_file_lister=safetensors_listing,
+    )
+    registry.get_or_load("org/model", pooling=Pooling.MEAN)  # no keep_alive given
+    assert registry._reap_once() == []
+    time.sleep(0.02)
+    assert registry._reap_once() == ["org/model"]
+
+
+def test_engine_batching_budgets_come_from_the_given_settings() -> None:
+    factory = StubFactory()
+    registry = ModelRegistry(
+        make_devices(1),
+        settings=Settings(max_batch_tokens=4096),
+        backend_factory=factory,
+        weight_file_lister=safetensors_listing,
+    )
+    engine = registry.get_or_load("org/model", pooling=Pooling.MEAN)
+    assert [budget for _, budget in engine.devices_with_budgets] == [4096]

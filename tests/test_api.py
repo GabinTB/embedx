@@ -92,23 +92,20 @@ class WrongShapeEngine(FakeEngine):
         return np.zeros(len(texts), dtype=np.float32)  # 1-D, not (n, dim)
 
 
-class TruncatingEngine(FakeEngine):
-    """Two devices behind one model, each having truncated some inputs."""
-
-    @property
-    def truncated_counts(self) -> list[int]:
-        return [7, 5]
-
-
 def make_settings(**overrides: object) -> Settings:
-    kwargs: dict[str, object] = {"model_id": "test-model", "pooling": "mean"}
-    kwargs.update(overrides)
-    return Settings(**kwargs)  # type: ignore[arg-type]
+    # No model fields any more: a server is configured without naming a
+    # checkpoint, and every request carries its own `model`.
+    return Settings(**overrides)  # type: ignore[arg-type]
 
 
 def make_client(engine: FakeEngine | None = None, **settings_overrides: object) -> TestClient:
-    engine = engine or FakeEngine()
-    app = create_app(make_settings(**settings_overrides), engine)  # type: ignore[arg-type]
+    """A client whose registry always resolves to `engine`.
+
+    For tests about the HTTP layer itself — encoding, limits, auth — where
+    which model served the request is beside the point.
+    """
+    registry = FakeRegistry(engine=engine or FakeEngine())
+    app = create_app(make_settings(**settings_overrides), registry)  # type: ignore[arg-type]
     return TestClient(app, raise_server_exceptions=False)
 
 
@@ -345,26 +342,21 @@ def test_health() -> None:
     assert response.json() == {"status": "ok"}
 
 
-def test_info_reports_server_config_and_the_legacy_fixed_model() -> None:
-    # The single-model startup path still serves until task 15 removes it,
-    # and it reports itself through the same per-model shape.
-    client = make_client(model_id="org/model", pooling="cls", normalize=False, dtype="float16")
+def test_info_reports_server_wide_config() -> None:
+    client = make_client(normalize=False, default_keep_alive_s=120, max_loaded_models=3)
     body = client.get("/info").json()
     assert body["version"] == embedx.__version__
     assert body["normalize"] is False
+    assert body["default_keep_alive_s"] == 120
+    assert body["max_loaded_models"] == 3
+    # A server that has loaded nothing is a normal server.
+    assert body["models"] == []
+
+
+def test_info_default_keep_alive_falls_back_to_the_settings_default() -> None:
+    body = make_client().get("/info").json()
     assert body["default_keep_alive_s"] == DEFAULT_KEEP_ALIVE_S
-    assert body["models"] == [
-        {
-            "model_id": "org/model",
-            "pooling": "cls",
-            "dtype": "float16",
-            "devices": [0],
-            "idle_s": 0.0,
-            "last_used_epoch_s": body["models"][0]["last_used_epoch_s"],
-            "ref_count": 0,
-            "truncated_count": 0,
-        }
-    ]
+    assert body["max_loaded_models"] is None
 
 
 # --------------------------------------------------------------------------- #
@@ -712,12 +704,11 @@ def test_health_touches_no_registry_state() -> None:
     assert registry.entered == 0
 
 
-def test_create_app_requires_exactly_one_model_source() -> None:
-    settings = make_settings()
-    with pytest.raises(ValueError, match="exactly one"):
-        create_app(settings)
-    with pytest.raises(ValueError, match="exactly one"):
-        create_app(settings, FakeEngine(), registry=FakeRegistry())  # type: ignore[arg-type]
+def test_create_app_requires_a_registry() -> None:
+    # The `engine` parameter and its adapter are gone: there is no way to
+    # build an app around one fixed model any more.
+    with pytest.raises(TypeError):
+        create_app(make_settings())  # type: ignore[call-arg]
 
 
 def test_end_to_end_against_a_real_registry() -> None:
@@ -773,7 +764,9 @@ def test_info_reports_truncation_summed_across_a_model_devices() -> None:
     # Equivalent in spirit to the old per-device assertion, against the
     # per-model shape: one model on two devices reports 7 + 5, not [7, 5].
     # Truncation is silent everywhere else, so /info is where it surfaces.
-    client = make_client(TruncatingEngine())
+    client, _ = make_registry_client(
+        FakeRegistry(loaded=[make_status("org/model", truncated_count=12)])
+    )
     body = client.get("/info").json()
     assert body["models"][0]["truncated_count"] == 12
 

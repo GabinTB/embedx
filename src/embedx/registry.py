@@ -56,15 +56,29 @@ from embedx.backend.factory import (
     hf_backend_factory,
     new_length_cache,
 )
-from embedx.config import Dtype, Pooling, Settings
+from embedx.config import DEFAULT_KEEP_ALIVE_S, Dtype, Pooling, Settings
 from embedx.engine.engine import Engine
 from embedx.gpu.discovery import DeviceInfo
 
 logger = logging.getLogger("embedx.registry")
 
-# Until task 15 wires `default_keep_alive_s` into Settings, an unspecified
-# keep_alive means this many idle seconds before eviction.
-DEFAULT_KEEP_ALIVE_S = 300.0
+# DEFAULT_KEEP_ALIVE_S is re-exported from config, where it now lives: the
+# registry cannot own it and also be configured by Settings, and config
+# cannot import the registry (the dependency runs the other way). Settings
+# is the source of truth; this is the fallback for a registry built without
+# one.
+__all__ = [
+    "DEFAULT_KEEP_ALIVE_S",
+    "ModelCapacityError",
+    "ModelPlacementError",
+    "ModelRegistry",
+    "ModelStatus",
+    "PoolingConflictError",
+    "PoolingRequiredError",
+    "RegistryError",
+    "UnsupportedWeightFormatError",
+    "WeightFormatUnverifiableError",
+]
 
 _SAFETENSORS_SUFFIX = ".safetensors"
 # Formats that go through `torch.load`, i.e. through pickle. Loading one
@@ -137,6 +151,27 @@ class UnsupportedWeightFormatError(RegistryError):
             f"found are {', '.join(files)}, which load through pickle and can "
             "execute arbitrary code. embedx will not load them. Ask the publisher "
             "for a safetensors conversion, or convert it yourself."
+        )
+
+
+class ModelCapacityError(RegistryError):
+    """`max_loaded_models` is reached and every resident model is in use.
+
+    Distinct from `ModelPlacementError`: the hardware is fine, the cap is
+    administrative, and the condition clears as soon as an in-flight
+    request finishes. Evicting a model another request is mid-way through
+    would be the one thing worse than making this one wait.
+    """
+
+    def __init__(self, model_id: str, resident: list[str], cap: int) -> None:
+        self.model_id = model_id
+        self.resident = list(resident)
+        self.cap = cap
+        super().__init__(
+            f"cannot load {model_id}: max_loaded_models={cap} is reached and all "
+            f"{len(resident)} resident model(s) ({', '.join(resident)}) are serving "
+            "requests, so none can be evicted to make room. Retry shortly, or raise "
+            "EMBEDX_MAX_LOADED_MODELS."
         )
 
 
@@ -315,10 +350,18 @@ class ModelRegistry:
         devices: list[DeviceInfo],
         reaper_interval_s: float = 30.0,
         *,
+        settings: Settings | None = None,
         backend_factory: BackendFactory | None = None,
         weight_file_lister: Callable[[str, str | None], list[str]] | None = None,
     ) -> None:
         """`devices` is the ranked list from `rank_devices`, fastest first.
+
+        `settings` supplies everything server-wide that a loaded model
+        needs and a request cannot say: the Engine's batching budgets,
+        `normalize`, `revision`, the default keep-alive and the residency
+        cap. It defaults to `Settings()` so a registry is still
+        constructible on its own, which is what the tests rely on; `serve`
+        passes the real one.
 
         `backend_factory` and `weight_file_lister` are the test seams: the
         defaults are the real HFBackend constructor and a hub/local file
@@ -326,6 +369,9 @@ class ModelRegistry:
         """
         self.devices = list(devices)
         self.reaper_interval_s = reaper_interval_s
+        self._settings = settings if settings is not None else Settings()
+        self.default_keep_alive_s = self._settings.default_keep_alive_s
+        self.max_loaded_models = self._settings.max_loaded_models
         self._backend_factory: BackendFactory = backend_factory or hf_backend_factory
         self._weight_file_lister = weight_file_lister or _default_weight_files
 
@@ -491,11 +537,11 @@ class ModelRegistry:
             if pooling is None:
                 raise PoolingRequiredError(model_id)
 
-            settings = self._settings_for(model_id, pooling, dtype, max_seq_len)
             # Before anything constructs a backend, and therefore before
             # anything hands a file to torch.load.
-            self._check_weight_format(model_id, settings.revision)
-            entry = self._load(model_id, settings, keep_alive)
+            self._check_weight_format(model_id, self._settings.revision)
+            self._make_room_for(model_id)
+            entry = self._load(model_id, pooling, dtype, max_seq_len, keep_alive)
 
             with self._entries_lock:
                 self._entries[model_id] = entry
@@ -537,25 +583,6 @@ class ModelRegistry:
                 self._load_locks[model_id] = lock
             return lock
 
-    def _settings_for(
-        self, model_id: str, pooling: Pooling, dtype: Dtype, max_seq_len: int | None
-    ) -> Settings:
-        """Per-model Settings carrying the load parameters.
-
-        The Engine takes its batching knobs (`max_batch_tokens`,
-        `device_batch_tokens`, `max_batch_items`) plus `normalize` and
-        `revision` from a Settings, so one is built per load from the
-        parameters given, with everything else at its default (or its
-        `EMBEDX_*` environment value). Task 15 replaces this with the real
-        Settings threaded through from the server.
-        """
-        return Settings(
-            model_id=model_id,
-            pooling=pooling,
-            dtype=dtype,
-            max_seq_len=max_seq_len,
-        )
-
     def _check_weight_format(self, model_id: str, revision: str | None) -> None:
         """Refuse a checkpoint whose only weights go through pickle.
 
@@ -589,7 +616,51 @@ class ModelRegistry:
         # No weight file of either kind: not this check's business. Let
         # from_pretrained say what it is actually missing.
 
-    def _load(self, model_id: str, settings: Settings, keep_alive: float | None) -> _Entry:
+    def _make_room_for(self, model_id: str) -> None:
+        """Enforce `max_loaded_models` by evicting the least-recently-used.
+
+        Refusing the request at the cap would make the cap a wall rather
+        than a budget; evicting is what the operator asked for by setting a
+        number. Only unreferenced models are candidates -- a model with a
+        request in flight is never taken out from under it, and if every
+        resident model is busy the load fails instead.
+
+        Called with this model's load lock held and the entry not yet in
+        the map, so the arithmetic is "one more than what is resident".
+        """
+        cap = self.max_loaded_models
+        if cap is None:
+            return
+        while True:
+            with self._entries_lock:
+                if len(self._entries) < cap:
+                    return
+                idle = [
+                    (entry.last_used, name)
+                    for name, entry in self._entries.items()
+                    if entry.ref_count == 0
+                ]
+                if not idle:
+                    raise ModelCapacityError(model_id, sorted(self._entries), cap)
+                _, victim = min(idle)
+                entry = self._entries.pop(victim)
+            logger.info(
+                "evicting %s (least recently used) to stay within max_loaded_models=%d "
+                "while loading %s",
+                victim,
+                cap,
+                model_id,
+            )
+            self._evict(victim, entry)
+
+    def _load(
+        self,
+        model_id: str,
+        pooling: Pooling,
+        dtype: Dtype,
+        max_seq_len: int | None,
+        keep_alive: float | None,
+    ) -> _Entry:
         """Place the model on every device it fits on, fastest first.
 
         No memory estimation: an estimate that is wrong in the optimistic
@@ -606,11 +677,11 @@ class ModelRegistry:
                 backend = self._backend_factory(
                     model_id=model_id,
                     device_index=device.index,
-                    pooling=settings.pooling,
-                    normalize=settings.normalize,
-                    dtype=settings.dtype,
-                    max_seq_length=settings.max_seq_len,
-                    revision=settings.revision,
+                    pooling=pooling,
+                    normalize=self._settings.normalize,
+                    dtype=dtype,
+                    max_seq_length=max_seq_len,
+                    revision=self._settings.revision,
                     length_cache=length_cache,
                 )
             except Exception as exc:
@@ -642,18 +713,18 @@ class ModelRegistry:
             "pooling for %s resolved to %s on first load (dtype=%s, device(s) %s); "
             "later requests naming a different pooling will be refused",
             model_id,
-            settings.pooling.value,
-            settings.dtype.value,
+            pooling.value,
+            dtype.value,
             [device.index for device in placed],
         )
         return _Entry(
-            engine=engine_from_backends(backends, placed, settings),
+            engine=engine_from_backends(backends, placed, self._settings),
             backends=backends,
             devices=placed,
-            pooling=settings.pooling,
-            dtype=settings.dtype,
-            max_seq_len=settings.max_seq_len,
-            keep_alive=DEFAULT_KEEP_ALIVE_S if keep_alive is None else keep_alive,
+            pooling=pooling,
+            dtype=dtype,
+            max_seq_len=max_seq_len,
+            keep_alive=(self.default_keep_alive_s if keep_alive is None else keep_alive),
             loaded_at=now,
             last_used=now,
             last_used_epoch=time.time(),
