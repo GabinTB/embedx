@@ -1,0 +1,1169 @@
+{
+  "purpose": "decompose cold model load latency; calibrate default_keep_alive_s and max_concurrent_loads",
+  "driver": "610.43.02",
+  "torch": "2.13.0+cu130",
+  "torch_cuda": "13.0",
+  "devices": [
+    {
+      "index": 0,
+      "name": "NVIDIA RTX PRO 2000 Blackwell",
+      "capability": [
+        12,
+        0
+      ],
+      "total_memory_gib": 15.48333740234375,
+      "free_gib_at_start": 15.3240966796875
+    },
+    {
+      "index": 1,
+      "name": "NVIDIA RTX A400",
+      "capability": [
+        8,
+        6
+      ],
+      "total_memory_gib": 3.6776123046875,
+      "free_gib_at_start": 3.62591552734375
+    }
+  ],
+  "vram_free_end_gib": {
+    "0": 15.3240966796875,
+    "1": 3.62591552734375
+  },
+  "other_vram_users": "152652, /home/luxor/Programming/embedx/.venv/bin/python3, 122 MiB\n152652, /home/luxor/Programming/embedx/.venv/bin/python3, 44 MiB",
+  "page_cache_eviction": {
+    "method": "posix_fadvise(POSIX_FADV_DONTNEED) per checkpoint file",
+    "reason_not_drop_caches": "drop_caches needs root; sudo requires a password on this host and was not used",
+    "verified_per_run": true
+  },
+  "measurement": {
+    "process_isolation": "one fresh subprocess per measurement, so kernel autotune caches and CUDA context are never shared",
+    "runs": {
+      "large": 3,
+      "small": 5
+    },
+    "stages_summed": false
+  },
+  "triton_python_headers": {
+    "system_python_dev_headers_present": false,
+    "workaround_cpath": "/home/luxor/.local/share/uv/python/cpython-3.14.6-linux-x86_64-gnu/include/python3.14",
+    "why": "torch dispatches Qwen3 RoPE to a Triton kernel; Triton JIT needs Python.h. Without python3.14-dev, Qwen3 inference fails on this host - for embedx in production too, not only for this notebook."
+  },
+  "nb03_h2d_gib_s": {
+    "0": 6.3613728480192595,
+    "1": 2.812591978768703
+  },
+  "per_model_device": {
+    "Qwen/Qwen3-Embedding-4B@cuda:0": {
+      "model_id": "Qwen/Qwen3-Embedding-4B",
+      "device_index": 0,
+      "device_name": "NVIDIA RTX PRO 2000 Blackwell",
+      "size_class": "large",
+      "runs": 3,
+      "weight_bytes": 8043592088,
+      "param_bytes": 8043548672,
+      "oom": false,
+      "eviction_verified_every_run": true,
+      "mmap_active": true,
+      "pcie_link_during_stage3": [
+        "gen3x8"
+      ],
+      "stage4_errors": [],
+      "median_stage1_disk_to_page_cache_s": 6.381704089999403,
+      "median_stage2_from_pretrained_cpu_s": 0.20454113999949186,
+      "median_stage2b_materialize_cpu_s": 0.2676927329994214,
+      "median_stage3_host_to_device_s": 1.316439296999306,
+      "median_stage4_warmup_overhead_s": 1.1928121029959584,
+      "median_stage3_gib_s": 5.690454907664384,
+      "median_stage1_gib_s": 1.1738524361059106,
+      "median_stage4_first_embed_s": 1.2273926969974127,
+      "median_stage4_warm_embed_s": 0.0345805940014543
+    },
+    "Qwen/Qwen3-Embedding-4B@cuda:1": {
+      "model_id": "Qwen/Qwen3-Embedding-4B",
+      "device_index": 1,
+      "device_name": "NVIDIA RTX A400",
+      "size_class": "large",
+      "runs": 3,
+      "weight_bytes": 8043592088,
+      "param_bytes": 8043548672,
+      "oom": true,
+      "eviction_verified_every_run": true,
+      "mmap_active": true,
+      "pcie_link_during_stage3": [
+        "gen3x4"
+      ],
+      "stage4_errors": [],
+      "median_stage1_disk_to_page_cache_s": 6.453443054000672,
+      "median_stage2_from_pretrained_cpu_s": 0.19979530300042825,
+      "median_stage2b_materialize_cpu_s": 0.26540361600200413,
+      "median_stage3_host_to_device_s": null,
+      "median_stage4_warmup_overhead_s": null,
+      "median_stage3_gib_s": null,
+      "median_stage1_gib_s": 1.160803439322031,
+      "median_stage4_first_embed_s": null,
+      "median_stage4_warm_embed_s": null
+    },
+    "intfloat/e5-small-v2@cuda:0": {
+      "model_id": "intfloat/e5-small-v2",
+      "device_index": 0,
+      "device_name": "NVIDIA RTX PRO 2000 Blackwell",
+      "size_class": "small",
+      "runs": 5,
+      "weight_bytes": 133466304,
+      "param_bytes": 66720000,
+      "oom": false,
+      "eviction_verified_every_run": true,
+      "mmap_active": true,
+      "pcie_link_during_stage3": [
+        "gen1x8",
+        "gen2x8",
+        "gen3x8"
+      ],
+      "stage4_errors": [],
+      "median_stage1_disk_to_page_cache_s": 0.1274923109995143,
+      "median_stage2_from_pretrained_cpu_s": 0.16894665499785333,
+      "median_stage2b_materialize_cpu_s": 0.005393095998442732,
+      "median_stage3_host_to_device_s": 0.020300534000853077,
+      "median_stage4_warmup_overhead_s": 0.2507656859997951,
+      "median_stage3_gib_s": 3.060896928905099,
+      "median_stage1_gib_s": 0.9749621831403281,
+      "median_stage4_first_embed_s": 0.2554082280003058,
+      "median_stage4_warm_embed_s": 0.004794421001861338
+    },
+    "intfloat/e5-small-v2@cuda:1": {
+      "model_id": "intfloat/e5-small-v2",
+      "device_index": 1,
+      "device_name": "NVIDIA RTX A400",
+      "size_class": "small",
+      "runs": 5,
+      "weight_bytes": 133466304,
+      "param_bytes": 66720000,
+      "oom": false,
+      "eviction_verified_every_run": true,
+      "mmap_active": true,
+      "pcie_link_during_stage3": [
+        "gen1x4",
+        "gen3x4"
+      ],
+      "stage4_errors": [],
+      "median_stage1_disk_to_page_cache_s": 0.1257252490031533,
+      "median_stage2_from_pretrained_cpu_s": 0.16858644600142725,
+      "median_stage2b_materialize_cpu_s": 0.004230038997775409,
+      "median_stage3_host_to_device_s": 0.035168490998330526,
+      "median_stage4_warmup_overhead_s": 0.26597859500179766,
+      "median_stage3_gib_s": 1.7668611991709982,
+      "median_stage1_gib_s": 0.9886652271619251,
+      "median_stage4_first_embed_s": 0.27059963300052914,
+      "median_stage4_warm_embed_s": 0.004446319999260595
+    },
+    "sentence-transformers/all-MiniLM-L6-v2@cuda:0": {
+      "model_id": "sentence-transformers/all-MiniLM-L6-v2",
+      "device_index": 0,
+      "device_name": "NVIDIA RTX PRO 2000 Blackwell",
+      "size_class": "small",
+      "runs": 5,
+      "weight_bytes": 90868376,
+      "param_bytes": 45426432,
+      "oom": false,
+      "eviction_verified_every_run": true,
+      "mmap_active": true,
+      "pcie_link_during_stage3": [
+        "gen2x8",
+        "gen3x8"
+      ],
+      "stage4_errors": [],
+      "median_stage1_disk_to_page_cache_s": 0.09724619000189705,
+      "median_stage2_from_pretrained_cpu_s": 0.14269709200016223,
+      "median_stage2b_materialize_cpu_s": 0.044396467001206474,
+      "median_stage3_host_to_device_s": 0.012657622999540763,
+      "median_stage4_warmup_overhead_s": 0.2510446360029164,
+      "median_stage3_gib_s": 3.342385976211324,
+      "median_stage1_gib_s": 0.8702425245225182,
+      "median_stage4_first_embed_s": 0.25365468400195823,
+      "median_stage4_warm_embed_s": 0.0026159890003327746
+    },
+    "sentence-transformers/all-MiniLM-L6-v2@cuda:1": {
+      "model_id": "sentence-transformers/all-MiniLM-L6-v2",
+      "device_index": 1,
+      "device_name": "NVIDIA RTX A400",
+      "size_class": "small",
+      "runs": 5,
+      "weight_bytes": 90868376,
+      "param_bytes": 45426432,
+      "oom": false,
+      "eviction_verified_every_run": true,
+      "mmap_active": true,
+      "pcie_link_during_stage3": [
+        "gen3x4"
+      ],
+      "stage4_errors": [],
+      "median_stage1_disk_to_page_cache_s": 0.09336813000118127,
+      "median_stage2_from_pretrained_cpu_s": 0.14083202699839603,
+      "median_stage2b_materialize_cpu_s": 0.04475316800017026,
+      "median_stage3_host_to_device_s": 0.02346213000055286,
+      "median_stage4_warmup_overhead_s": 0.2643304640041606,
+      "median_stage3_gib_s": 1.803189292908958,
+      "median_stage1_gib_s": 0.906388184987497,
+      "median_stage4_first_embed_s": 0.26674923000246054,
+      "median_stage4_warm_embed_s": 0.002457506001519505
+    }
+  },
+  "pcie_crosscheck": {
+    "Qwen/Qwen3-Embedding-4B@cuda:0": {
+      "param_gib": 7.491138458251953,
+      "nb03_h2d_gib_s": 6.3613728480192595,
+      "predicted_pcie_s": 1.177597766586574,
+      "observed_stage3_s": 1.316439296999306,
+      "observed_over_predicted": 1.1179023384318933,
+      "effective_gib_s": 5.690454907664384
+    },
+    "intfloat/e5-small-v2@cuda:0": {
+      "param_gib": 0.06213784217834473,
+      "nb03_h2d_gib_s": 6.3613728480192595,
+      "predicted_pcie_s": 0.009767992485724616,
+      "observed_stage3_s": 0.020300534000853077,
+      "observed_over_predicted": 2.078270845367786,
+      "effective_gib_s": 3.060896928905099
+    },
+    "intfloat/e5-small-v2@cuda:1": {
+      "param_gib": 0.06213784217834473,
+      "nb03_h2d_gib_s": 2.812591978768703,
+      "predicted_pcie_s": 0.02209273248569366,
+      "observed_stage3_s": 0.035168490998330526,
+      "observed_over_predicted": 1.5918579116958116,
+      "effective_gib_s": 1.7668611991709982
+    },
+    "sentence-transformers/all-MiniLM-L6-v2@cuda:0": {
+      "param_gib": 0.04230666160583496,
+      "nb03_h2d_gib_s": 6.3613728480192595,
+      "predicted_pcie_s": 0.006650555252237414,
+      "observed_stage3_s": 0.012657622999540763,
+      "observed_over_predicted": 1.9032430405389715,
+      "effective_gib_s": 3.342385976211324
+    },
+    "sentence-transformers/all-MiniLM-L6-v2@cuda:1": {
+      "param_gib": 0.04230666160583496,
+      "nb03_h2d_gib_s": 2.812591978768703,
+      "predicted_pcie_s": 0.015041876648014896,
+      "observed_stage3_s": 0.02346213000055286,
+      "observed_over_predicted": 1.5597874221132642,
+      "effective_gib_s": 1.803189292908958
+    }
+  },
+  "concurrent_vs_sequential": {
+    "cross-device": {
+      "pair": [
+        {
+          "model_id": "Qwen/Qwen3-Embedding-4B",
+          "device_index": 0
+        },
+        {
+          "model_id": "intfloat/e5-small-v2",
+          "device_index": 1
+        }
+      ],
+      "sequential_each_s": [
+        14.192233836001833,
+        4.923815460999322
+      ],
+      "sequential_makespan_s": 19.116049297001155,
+      "concurrent_each_s": [
+        13.495928426997125,
+        5.159885633001977
+      ],
+      "concurrent_makespan_s": 13.496454463998816,
+      "per_load_slowdown": [
+        0.9509375749405727,
+        1.0479445612599672
+      ],
+      "makespan_speedup": 1.4163756376159646
+    },
+    "same-device": {
+      "pair": [
+        {
+          "model_id": "intfloat/e5-small-v2",
+          "device_index": 0
+        },
+        {
+          "model_id": "sentence-transformers/all-MiniLM-L6-v2",
+          "device_index": 0
+        }
+      ],
+      "sequential_each_s": [
+        4.976753885999642,
+        4.8012031099970045
+      ],
+      "sequential_makespan_s": 9.777956995996647,
+      "concurrent_each_s": [
+        5.660043061998294,
+        5.540210022998508
+      ],
+      "concurrent_makespan_s": 5.660475262997352,
+      "per_load_slowdown": [
+        1.1372961556167862,
+        1.1539211935155904
+      ],
+      "makespan_speedup": 1.7274091912238114
+    }
+  },
+  "raw_measurements": [
+    {
+      "model_id": "Qwen/Qwen3-Embedding-4B",
+      "device_index": 0,
+      "weight_bytes": 8043592088,
+      "weight_files": 2,
+      "evicted_mib": 7670.96875,
+      "eviction_verified": true,
+      "stage1_disk_to_page_cache_s": 6.381704089999403,
+      "stage1_gib_s": 1.1738524361059106,
+      "stage2_from_pretrained_cpu_s": 0.2263901389997045,
+      "mmap_active": true,
+      "stage2b_materialize_cpu_s": 0.9787272529974871,
+      "param_bytes": 8043548672,
+      "stage3_host_to_device_s": 1.3749704099973314,
+      "oom": false,
+      "pcie_link_during_stage3": [
+        "gen3x8"
+      ],
+      "stage3_gib_s": 5.448217942571209,
+      "stage4_error": null,
+      "stage4_first_embed_s": 1.2359026189988072,
+      "stage4_warm_embed_s": 0.03453435499977786,
+      "stage4_all_calls_s": [
+        1.2359026189988072,
+        0.03498351499729324,
+        0.03453435499977786,
+        0.03466658199977246,
+        0.034766991000651615
+      ],
+      "stage4_warmup_overhead_s": 1.2013682639990293,
+      "ready_at": 1785548319.9118624,
+      "run": 0,
+      "size_class": "large"
+    },
+    {
+      "model_id": "Qwen/Qwen3-Embedding-4B",
+      "device_index": 0,
+      "weight_bytes": 8043592088,
+      "weight_files": 2,
+      "evicted_mib": 7670.98828125,
+      "eviction_verified": true,
+      "stage1_disk_to_page_cache_s": 6.584702587002539,
+      "stage1_gib_s": 1.137663970934632,
+      "stage2_from_pretrained_cpu_s": 0.1956898150019697,
+      "mmap_active": true,
+      "stage2b_materialize_cpu_s": 0.26664215700293425,
+      "param_bytes": 8043548672,
+      "stage3_host_to_device_s": 1.309850200002984,
+      "oom": false,
+      "pcie_link_during_stage3": [
+        "gen3x8"
+      ],
+      "stage3_gib_s": 5.719080287375524,
+      "stage4_error": null,
+      "stage4_first_embed_s": 1.21564442500312,
+      "stage4_warm_embed_s": 0.03458874200077844,
+      "stage4_all_calls_s": [
+        1.21564442500312,
+        0.03458874200077844,
+        0.0350599079974927,
+        0.034639219997188775,
+        0.034591456002090126
+      ],
+      "stage4_warmup_overhead_s": 1.1810556830023415,
+      "ready_at": 1785548334.167598,
+      "run": 1,
+      "size_class": "large"
+    },
+    {
+      "model_id": "Qwen/Qwen3-Embedding-4B",
+      "device_index": 0,
+      "weight_bytes": 8043592088,
+      "weight_files": 2,
+      "evicted_mib": 7670.96875,
+      "eviction_verified": true,
+      "stage1_disk_to_page_cache_s": 6.376326882000285,
+      "stage1_gib_s": 1.1748423553534686,
+      "stage2_from_pretrained_cpu_s": 0.20454113999949186,
+      "mmap_active": true,
+      "stage2b_materialize_cpu_s": 0.2676927329994214,
+      "param_bytes": 8043548672,
+      "stage3_host_to_device_s": 1.316439296999306,
+      "oom": false,
+      "pcie_link_during_stage3": [
+        "gen3x8"
+      ],
+      "stage3_gib_s": 5.690454907664384,
+      "stage4_error": null,
+      "stage4_first_embed_s": 1.2273926969974127,
+      "stage4_warm_embed_s": 0.0345805940014543,
+      "stage4_all_calls_s": [
+        1.2273926969974127,
+        0.034588607002660865,
+        0.0345805940014543,
+        0.03695185700053116,
+        0.03525562600043486
+      ],
+      "stage4_warmup_overhead_s": 1.1928121029959584,
+      "ready_at": 1785548348.284096,
+      "run": 2,
+      "size_class": "large"
+    },
+    {
+      "model_id": "Qwen/Qwen3-Embedding-4B",
+      "device_index": 1,
+      "weight_bytes": 8043592088,
+      "weight_files": 2,
+      "evicted_mib": 7670.96875,
+      "eviction_verified": true,
+      "stage1_disk_to_page_cache_s": 6.465897773003235,
+      "stage1_gib_s": 1.1585674805794839,
+      "stage2_from_pretrained_cpu_s": 0.19898931100033224,
+      "mmap_active": true,
+      "stage2b_materialize_cpu_s": 0.28519203499672585,
+      "param_bytes": 8043548672,
+      "stage3_host_to_device_s": null,
+      "oom": true,
+      "oom_detail": "OutOfMemoryError: CUDA out of memory. Tried to allocate 48.00 MiB. GPU 1 has a total capacity of 3.68 GiB of which 47.81 MiB is free. Process 152652 has 44.00 MiB memory in use. Including non-PyTorch memory, this proce",
+      "pcie_link_during_stage3": [
+        "gen3x4"
+      ],
+      "stage4_error": null,
+      "ready_at": 1785548360.9479399,
+      "run": 0,
+      "size_class": "large"
+    },
+    {
+      "model_id": "Qwen/Qwen3-Embedding-4B",
+      "device_index": 1,
+      "weight_bytes": 8043592088,
+      "weight_files": 2,
+      "evicted_mib": 7670.98828125,
+      "eviction_verified": true,
+      "stage1_disk_to_page_cache_s": 6.307510317001288,
+      "stage1_gib_s": 1.1876601885788596,
+      "stage2_from_pretrained_cpu_s": 0.20551347299988265,
+      "mmap_active": true,
+      "stage2b_materialize_cpu_s": 0.25900119400102994,
+      "param_bytes": 8043548672,
+      "stage3_host_to_device_s": null,
+      "oom": true,
+      "oom_detail": "OutOfMemoryError: CUDA out of memory. Tried to allocate 48.00 MiB. GPU 1 has a total capacity of 3.68 GiB of which 47.81 MiB is free. Process 152652 has 44.00 MiB memory in use. Including non-PyTorch memory, this proce",
+      "pcie_link_during_stage3": [
+        "gen3x4"
+      ],
+      "stage4_error": null,
+      "ready_at": 1785548373.3536227,
+      "run": 1,
+      "size_class": "large"
+    },
+    {
+      "model_id": "Qwen/Qwen3-Embedding-4B",
+      "device_index": 1,
+      "weight_bytes": 8043592088,
+      "weight_files": 2,
+      "evicted_mib": 7670.98828125,
+      "eviction_verified": true,
+      "stage1_disk_to_page_cache_s": 6.453443054000672,
+      "stage1_gib_s": 1.160803439322031,
+      "stage2_from_pretrained_cpu_s": 0.19979530300042825,
+      "mmap_active": true,
+      "stage2b_materialize_cpu_s": 0.26540361600200413,
+      "param_bytes": 8043548672,
+      "stage3_host_to_device_s": null,
+      "oom": true,
+      "oom_detail": "OutOfMemoryError: CUDA out of memory. Tried to allocate 48.00 MiB. GPU 1 has a total capacity of 3.68 GiB of which 47.81 MiB is free. Process 152652 has 44.00 MiB memory in use. Including non-PyTorch memory, this proce",
+      "pcie_link_during_stage3": [
+        "gen3x4"
+      ],
+      "stage4_error": null,
+      "ready_at": 1785548385.9121547,
+      "run": 2,
+      "size_class": "large"
+    },
+    {
+      "model_id": "intfloat/e5-small-v2",
+      "device_index": 0,
+      "weight_bytes": 133466304,
+      "weight_files": 1,
+      "evicted_mib": 127.3046875,
+      "eviction_verified": true,
+      "stage1_disk_to_page_cache_s": 0.1274923109995143,
+      "stage1_gib_s": 0.9749621831403281,
+      "stage2_from_pretrained_cpu_s": 0.16894665499785333,
+      "mmap_active": true,
+      "stage2b_materialize_cpu_s": 0.005393095998442732,
+      "param_bytes": 66720000,
+      "stage3_host_to_device_s": 0.019901998002751498,
+      "oom": false,
+      "pcie_link_during_stage3": [
+        "gen1x8",
+        "gen3x8"
+      ],
+      "stage3_gib_s": 3.1221911573779693,
+      "stage4_error": null,
+      "stage4_first_embed_s": 0.2531166849985311,
+      "stage4_warm_embed_s": 0.0047414649998245295,
+      "stage4_all_calls_s": [
+        0.2531166849985311,
+        0.005107313001644798,
+        0.005151736000698293,
+        0.005082826999569079,
+        0.0047414649998245295
+      ],
+      "stage4_warmup_overhead_s": 0.2483752199987066,
+      "ready_at": 1785548390.8075776,
+      "run": 0,
+      "size_class": "small"
+    },
+    {
+      "model_id": "intfloat/e5-small-v2",
+      "device_index": 0,
+      "weight_bytes": 133466304,
+      "weight_files": 1,
+      "evicted_mib": 127.28515625,
+      "eviction_verified": true,
+      "stage1_disk_to_page_cache_s": 0.12453970999922603,
+      "stage1_gib_s": 0.9980766926987755,
+      "stage2_from_pretrained_cpu_s": 0.1672969799983548,
+      "mmap_active": true,
+      "stage2b_materialize_cpu_s": 0.005184210000152234,
+      "param_bytes": 66720000,
+      "stage3_host_to_device_s": 0.02054160500119906,
+      "oom": false,
+      "pcie_link_during_stage3": [
+        "gen3x8"
+      ],
+      "stage3_gib_s": 3.0249750287145334,
+      "stage4_error": null,
+      "stage4_first_embed_s": 0.2554082280003058,
+      "stage4_warm_embed_s": 0.00464254200051073,
+      "stage4_all_calls_s": [
+        0.2554082280003058,
+        0.005019057000026805,
+        0.004656979002902517,
+        0.004644219003239414,
+        0.00464254200051073
+      ],
+      "stage4_warmup_overhead_s": 0.2507656859997951,
+      "ready_at": 1785548395.6319718,
+      "run": 1,
+      "size_class": "small"
+    },
+    {
+      "model_id": "intfloat/e5-small-v2",
+      "device_index": 0,
+      "weight_bytes": 133466304,
+      "weight_files": 1,
+      "evicted_mib": 127.328125,
+      "eviction_verified": true,
+      "stage1_disk_to_page_cache_s": 0.12964690999797313,
+      "stage1_gib_s": 0.9587593091700791,
+      "stage2_from_pretrained_cpu_s": 0.17564491699886275,
+      "mmap_active": true,
+      "stage2b_materialize_cpu_s": 0.02835540199885145,
+      "param_bytes": 66720000,
+      "stage3_host_to_device_s": 0.02054220100035309,
+      "oom": false,
+      "pcie_link_during_stage3": [
+        "gen3x8"
+      ],
+      "stage3_gib_s": 3.0248872638952697,
+      "stage4_error": null,
+      "stage4_first_embed_s": 0.25880740100183175,
+      "stage4_warm_embed_s": 0.004885798996838275,
+      "stage4_all_calls_s": [
+        0.25880740100183175,
+        0.005265478001092561,
+        0.004885798996838275,
+        0.0049817430008261,
+        0.00504552100028377
+      ],
+      "stage4_warmup_overhead_s": 0.2539216020049935,
+      "ready_at": 1785548400.4912372,
+      "run": 2,
+      "size_class": "small"
+    },
+    {
+      "model_id": "intfloat/e5-small-v2",
+      "device_index": 0,
+      "weight_bytes": 133466304,
+      "weight_files": 1,
+      "evicted_mib": 127.3125,
+      "eviction_verified": true,
+      "stage1_disk_to_page_cache_s": 0.13135791899912874,
+      "stage1_gib_s": 0.9462709428771978,
+      "stage2_from_pretrained_cpu_s": 0.16677412900025956,
+      "mmap_active": true,
+      "stage2b_materialize_cpu_s": 0.06237749199863174,
+      "param_bytes": 66720000,
+      "stage3_host_to_device_s": 0.020300534000853077,
+      "oom": false,
+      "pcie_link_during_stage3": [
+        "gen3x8"
+      ],
+      "stage3_gib_s": 3.060896928905099,
+      "stage4_error": null,
+      "stage4_first_embed_s": 0.24912845400103834,
+      "stage4_warm_embed_s": 0.004794421001861338,
+      "stage4_all_calls_s": [
+        0.24912845400103834,
+        0.005273699000099441,
+        0.004927735000819666,
+        0.004848103999393061,
+        0.004794421001861338
+      ],
+      "stage4_warmup_overhead_s": 0.244334032999177,
+      "ready_at": 1785548405.4195566,
+      "run": 3,
+      "size_class": "small"
+    },
+    {
+      "model_id": "intfloat/e5-small-v2",
+      "device_index": 0,
+      "weight_bytes": 133466304,
+      "weight_files": 1,
+      "evicted_mib": 127.3125,
+      "eviction_verified": true,
+      "stage1_disk_to_page_cache_s": 0.11455433800074388,
+      "stage1_gib_s": 1.0850761659055197,
+      "stage2_from_pretrained_cpu_s": 0.16898784899967723,
+      "mmap_active": true,
+      "stage2b_materialize_cpu_s": 0.0042748320011014584,
+      "param_bytes": 66720000,
+      "stage3_host_to_device_s": 0.019429502997809323,
+      "oom": false,
+      "pcie_link_during_stage3": [
+        "gen2x8",
+        "gen3x8"
+      ],
+      "stage3_gib_s": 3.1981179438995824,
+      "stage4_error": null,
+      "stage4_first_embed_s": 0.25942178400146076,
+      "stage4_warm_embed_s": 0.005092587001854554,
+      "stage4_all_calls_s": [
+        0.25942178400146076,
+        0.005683445000613574,
+        0.0058357169982627966,
+        0.005184837998967851,
+        0.005092587001854554
+      ],
+      "stage4_warmup_overhead_s": 0.2543291969996062,
+      "ready_at": 1785548410.3418348,
+      "run": 4,
+      "size_class": "small"
+    },
+    {
+      "model_id": "intfloat/e5-small-v2",
+      "device_index": 1,
+      "weight_bytes": 133466304,
+      "weight_files": 1,
+      "evicted_mib": 127.30859375,
+      "eviction_verified": true,
+      "stage1_disk_to_page_cache_s": 0.1261416890010878,
+      "stage1_gib_s": 0.9854012804967295,
+      "stage2_from_pretrained_cpu_s": 0.1697046329973091,
+      "mmap_active": true,
+      "stage2b_materialize_cpu_s": 0.004306281000026502,
+      "param_bytes": 66720000,
+      "stage3_host_to_device_s": 0.035044717998971464,
+      "oom": false,
+      "pcie_link_during_stage3": [
+        "gen3x4"
+      ],
+      "stage3_gib_s": 1.773101503632257,
+      "stage4_error": null,
+      "stage4_first_embed_s": 0.271988391999912,
+      "stage4_warm_embed_s": 0.004468045000976417,
+      "stage4_all_calls_s": [
+        0.271988391999912,
+        0.005104066000058083,
+        0.004527744000370149,
+        0.004468045000976417,
+        0.00455993700234103
+      ],
+      "stage4_warmup_overhead_s": 0.26752034699893557,
+      "ready_at": 1785548415.1851523,
+      "run": 0,
+      "size_class": "small"
+    },
+    {
+      "model_id": "intfloat/e5-small-v2",
+      "device_index": 1,
+      "weight_bytes": 133466304,
+      "weight_files": 1,
+      "evicted_mib": 127.28515625,
+      "eviction_verified": true,
+      "stage1_disk_to_page_cache_s": 0.13238208000257146,
+      "stage1_gib_s": 0.9389502103553417,
+      "stage2_from_pretrained_cpu_s": 0.16681387800053926,
+      "mmap_active": true,
+      "stage2b_materialize_cpu_s": 0.004230038997775409,
+      "param_bytes": 66720000,
+      "stage3_host_to_device_s": 0.03577117800159613,
+      "oom": false,
+      "pcie_link_during_stage3": [
+        "gen3x4"
+      ],
+      "stage3_gib_s": 1.7370924204836673,
+      "stage4_error": null,
+      "stage4_first_embed_s": 0.26701179500014405,
+      "stage4_warm_embed_s": 0.004446319999260595,
+      "stage4_all_calls_s": [
+        0.26701179500014405,
+        0.004843513001105748,
+        0.004485566001676489,
+        0.004446319999260595,
+        0.00447952600006829
+      ],
+      "stage4_warmup_overhead_s": 0.26256547500088345,
+      "ready_at": 1785548420.0730698,
+      "run": 1,
+      "size_class": "small"
+    },
+    {
+      "model_id": "intfloat/e5-small-v2",
+      "device_index": 1,
+      "weight_bytes": 133466304,
+      "weight_files": 1,
+      "evicted_mib": 127.28515625,
+      "eviction_verified": true,
+      "stage1_disk_to_page_cache_s": 0.11353369499920518,
+      "stage1_gib_s": 1.0948307625023772,
+      "stage2_from_pretrained_cpu_s": 0.17248687299797894,
+      "mmap_active": true,
+      "stage2b_materialize_cpu_s": 0.004217363999487134,
+      "param_bytes": 66720000,
+      "stage3_host_to_device_s": 0.034610382997925626,
+      "oom": false,
+      "pcie_link_during_stage3": [
+        "gen1x4",
+        "gen3x4"
+      ],
+      "stage3_gib_s": 1.7953526310896057,
+      "stage4_error": null,
+      "stage4_first_embed_s": 0.27582687699759845,
+      "stage4_warm_embed_s": 0.004435756000020774,
+      "stage4_all_calls_s": [
+        0.27582687699759845,
+        0.00496382200071821,
+        0.0044815369983552955,
+        0.004435756000020774,
+        0.004478048998862505
+      ],
+      "stage4_warmup_overhead_s": 0.2713911209975777,
+      "ready_at": 1785548425.0428877,
+      "run": 2,
+      "size_class": "small"
+    },
+    {
+      "model_id": "intfloat/e5-small-v2",
+      "device_index": 1,
+      "weight_bytes": 133466304,
+      "weight_files": 1,
+      "evicted_mib": 127.28515625,
+      "eviction_verified": true,
+      "stage1_disk_to_page_cache_s": 0.11068801800138317,
+      "stage1_gib_s": 1.1229777541426287,
+      "stage2_from_pretrained_cpu_s": 0.16858644600142725,
+      "mmap_active": true,
+      "stage2b_materialize_cpu_s": 0.05390224999791826,
+      "param_bytes": 66720000,
+      "stage3_host_to_device_s": 0.035168490998330526,
+      "oom": false,
+      "pcie_link_during_stage3": [
+        "gen3x4"
+      ],
+      "stage3_gib_s": 1.7668611991709982,
+      "stage4_error": null,
+      "stage4_first_embed_s": 0.27059963300052914,
+      "stage4_warm_embed_s": 0.004621037998731481,
+      "stage4_all_calls_s": [
+        0.27059963300052914,
+        0.00505157600127859,
+        0.004685513998992974,
+        0.004621037998731481,
+        0.0046554430009564385
+      ],
+      "stage4_warmup_overhead_s": 0.26597859500179766,
+      "ready_at": 1785548429.9801376,
+      "run": 3,
+      "size_class": "small"
+    },
+    {
+      "model_id": "intfloat/e5-small-v2",
+      "device_index": 1,
+      "weight_bytes": 133466304,
+      "weight_files": 1,
+      "evicted_mib": 127.28515625,
+      "eviction_verified": true,
+      "stage1_disk_to_page_cache_s": 0.1257252490031533,
+      "stage1_gib_s": 0.9886652271619251,
+      "stage2_from_pretrained_cpu_s": 0.16394208400015486,
+      "mmap_active": true,
+      "stage2b_materialize_cpu_s": 0.004209601000184193,
+      "param_bytes": 66720000,
+      "stage3_host_to_device_s": 0.035516122999979416,
+      "oom": false,
+      "pcie_link_during_stage3": [
+        "gen3x4"
+      ],
+      "stage3_gib_s": 1.7495671523150413,
+      "stage4_error": null,
+      "stage4_first_embed_s": 0.26455194499794743,
+      "stage4_warm_embed_s": 0.004367996996734291,
+      "stage4_all_calls_s": [
+        0.26455194499794743,
+        0.004753568999149138,
+        0.0044048540003132075,
+        0.004369660997326719,
+        0.004367996996734291
+      ],
+      "stage4_warmup_overhead_s": 0.26018394800121314,
+      "ready_at": 1785548434.8537161,
+      "run": 4,
+      "size_class": "small"
+    },
+    {
+      "model_id": "sentence-transformers/all-MiniLM-L6-v2",
+      "device_index": 0,
+      "weight_bytes": 90868376,
+      "weight_files": 1,
+      "evicted_mib": 86.6875,
+      "eviction_verified": true,
+      "stage1_disk_to_page_cache_s": 0.10059424800056149,
+      "stage1_gib_s": 0.8412784186922396,
+      "stage2_from_pretrained_cpu_s": 0.14269709200016223,
+      "mmap_active": true,
+      "stage2b_materialize_cpu_s": 0.054730767998989904,
+      "param_bytes": 45426432,
+      "stage3_host_to_device_s": 0.012657622999540763,
+      "oom": false,
+      "pcie_link_during_stage3": [
+        "gen3x8"
+      ],
+      "stage3_gib_s": 3.342385976211324,
+      "stage4_error": null,
+      "stage4_first_embed_s": 0.25649456300016027,
+      "stage4_warm_embed_s": 0.002643919000547612,
+      "stage4_all_calls_s": [
+        0.25649456300016027,
+        0.0029659370011358988,
+        0.002664213996467879,
+        0.002643919000547612,
+        0.0027259240014245734
+      ],
+      "stage4_warmup_overhead_s": 0.25385064399961266,
+      "ready_at": 1785548439.7237866,
+      "run": 0,
+      "size_class": "small"
+    },
+    {
+      "model_id": "sentence-transformers/all-MiniLM-L6-v2",
+      "device_index": 0,
+      "weight_bytes": 90868376,
+      "weight_files": 1,
+      "evicted_mib": 86.57421875,
+      "eviction_verified": true,
+      "stage1_disk_to_page_cache_s": 0.09483302499938873,
+      "stage1_gib_s": 0.8923871181794828,
+      "stage2_from_pretrained_cpu_s": 0.13680589100113139,
+      "mmap_active": true,
+      "stage2b_materialize_cpu_s": 0.04615887600084534,
+      "param_bytes": 45426432,
+      "stage3_host_to_device_s": 0.012390853000397328,
+      "oom": false,
+      "pcie_link_during_stage3": [
+        "gen3x8"
+      ],
+      "stage3_gib_s": 3.414346179756821,
+      "stage4_error": null,
+      "stage4_first_embed_s": 0.24790285700146342,
+      "stage4_warm_embed_s": 0.0026159890003327746,
+      "stage4_all_calls_s": [
+        0.24790285700146342,
+        0.0030839669998385943,
+        0.0026244620021316223,
+        0.0026187420007772744,
+        0.0026159890003327746
+      ],
+      "stage4_warmup_overhead_s": 0.24528686800113064,
+      "ready_at": 1785548444.521586,
+      "run": 1,
+      "size_class": "small"
+    },
+    {
+      "model_id": "sentence-transformers/all-MiniLM-L6-v2",
+      "device_index": 0,
+      "weight_bytes": 90868376,
+      "weight_files": 1,
+      "evicted_mib": 86.6875,
+      "eviction_verified": true,
+      "stage1_disk_to_page_cache_s": 0.09650811500250711,
+      "stage1_gib_s": 0.8768979674429335,
+      "stage2_from_pretrained_cpu_s": 0.1455698060017312,
+      "mmap_active": true,
+      "stage2b_materialize_cpu_s": 0.011958643997786567,
+      "param_bytes": 45426432,
+      "stage3_host_to_device_s": 0.012362669000140158,
+      "oom": false,
+      "pcie_link_during_stage3": [
+        "gen3x8"
+      ],
+      "stage3_gib_s": 3.4221300922442652,
+      "stage4_error": null,
+      "stage4_first_embed_s": 0.2557502570016368,
+      "stage4_warm_embed_s": 0.002647360000992194,
+      "stage4_all_calls_s": [
+        0.2557502570016368,
+        0.0030011369999556337,
+        0.002655100997799309,
+        0.002647360000992194,
+        0.0026618299998517614
+      ],
+      "stage4_warmup_overhead_s": 0.2531028970006446,
+      "ready_at": 1785548449.2929106,
+      "run": 2,
+      "size_class": "small"
+    },
+    {
+      "model_id": "sentence-transformers/all-MiniLM-L6-v2",
+      "device_index": 0,
+      "weight_bytes": 90868376,
+      "weight_files": 1,
+      "evicted_mib": 86.6875,
+      "eviction_verified": true,
+      "stage1_disk_to_page_cache_s": 0.10201600099753705,
+      "stage1_gib_s": 0.8295538842920387,
+      "stage2_from_pretrained_cpu_s": 0.13814310900124838,
+      "mmap_active": true,
+      "stage2b_materialize_cpu_s": 0.044396467001206474,
+      "param_bytes": 45426432,
+      "stage3_host_to_device_s": 0.013303249997989042,
+      "oom": false,
+      "pcie_link_during_stage3": [
+        "gen3x8"
+      ],
+      "stage3_gib_s": 3.1801748905139844,
+      "stage4_error": null,
+      "stage4_first_embed_s": 0.24672863900195807,
+      "stage4_warm_embed_s": 0.0024921350013755728,
+      "stage4_all_calls_s": [
+        0.24672863900195807,
+        0.0028369530009513255,
+        0.0025120619975496083,
+        0.0024921350013755728,
+        0.0024992069993459154
+      ],
+      "stage4_warmup_overhead_s": 0.2442365040005825,
+      "ready_at": 1785548454.0977669,
+      "run": 3,
+      "size_class": "small"
+    },
+    {
+      "model_id": "sentence-transformers/all-MiniLM-L6-v2",
+      "device_index": 0,
+      "weight_bytes": 90868376,
+      "weight_files": 1,
+      "evicted_mib": 86.66015625,
+      "eviction_verified": true,
+      "stage1_disk_to_page_cache_s": 0.09724619000189705,
+      "stage1_gib_s": 0.8702425245225182,
+      "stage2_from_pretrained_cpu_s": 0.14361126699805027,
+      "mmap_active": true,
+      "stage2b_materialize_cpu_s": 0.04388177700093365,
+      "param_bytes": 45426432,
+      "stage3_host_to_device_s": 0.01369888499903027,
+      "oom": false,
+      "pcie_link_during_stage3": [
+        "gen2x8",
+        "gen3x8"
+      ],
+      "stage3_gib_s": 3.088328839086525,
+      "stage4_error": null,
+      "stage4_first_embed_s": 0.25365468400195823,
+      "stage4_warm_embed_s": 0.0026100479990418535,
+      "stage4_all_calls_s": [
+        0.25365468400195823,
+        0.0029779579999740236,
+        0.0026100479990418535,
+        0.002648927998961881,
+        0.002612120002595475
+      ],
+      "stage4_warmup_overhead_s": 0.2510446360029164,
+      "ready_at": 1785548458.8930821,
+      "run": 4,
+      "size_class": "small"
+    },
+    {
+      "model_id": "sentence-transformers/all-MiniLM-L6-v2",
+      "device_index": 1,
+      "weight_bytes": 90868376,
+      "weight_files": 1,
+      "evicted_mib": 86.6875,
+      "eviction_verified": true,
+      "stage1_disk_to_page_cache_s": 0.07469839400073397,
+      "stage1_gib_s": 1.1329262298010827,
+      "stage2_from_pretrained_cpu_s": 0.13978991900148685,
+      "mmap_active": true,
+      "stage2b_materialize_cpu_s": 0.013869849000911927,
+      "param_bytes": 45426432,
+      "stage3_host_to_device_s": 0.023442405999958282,
+      "oom": false,
+      "pcie_link_during_stage3": [
+        "gen3x4"
+      ],
+      "stage3_gib_s": 1.804706462549546,
+      "stage4_error": null,
+      "stage4_first_embed_s": 0.2687051379980403,
+      "stage4_warm_embed_s": 0.002457506001519505,
+      "stage4_all_calls_s": [
+        0.2687051379980403,
+        0.002831555000739172,
+        0.002489946000423515,
+        0.002457506001519505,
+        0.0024866540006769355
+      ],
+      "stage4_warmup_overhead_s": 0.2662476319965208,
+      "ready_at": 1785548463.64412,
+      "run": 0,
+      "size_class": "small"
+    },
+    {
+      "model_id": "sentence-transformers/all-MiniLM-L6-v2",
+      "device_index": 1,
+      "weight_bytes": 90868376,
+      "weight_files": 1,
+      "evicted_mib": 86.58203125,
+      "eviction_verified": true,
+      "stage1_disk_to_page_cache_s": 0.07906276500216336,
+      "stage1_gib_s": 1.0703871776446439,
+      "stage2_from_pretrained_cpu_s": 0.14540660599959665,
+      "mmap_active": true,
+      "stage2b_materialize_cpu_s": 0.04475316800017026,
+      "param_bytes": 45426432,
+      "stage3_host_to_device_s": 0.023665715001698118,
+      "oom": false,
+      "pcie_link_during_stage3": [
+        "gen3x4"
+      ],
+      "stage3_gib_s": 1.787677304607077,
+      "stage4_error": null,
+      "stage4_first_embed_s": 0.2803919379985018,
+      "stage4_warm_embed_s": 0.002579028001491679,
+      "stage4_all_calls_s": [
+        0.2803919379985018,
+        0.002937256002041977,
+        0.0025943709988496266,
+        0.002579028001491679,
+        0.002595794001535978
+      ],
+      "stage4_warmup_overhead_s": 0.27781290999701014,
+      "ready_at": 1785548468.5253015,
+      "run": 1,
+      "size_class": "small"
+    },
+    {
+      "model_id": "sentence-transformers/all-MiniLM-L6-v2",
+      "device_index": 1,
+      "weight_bytes": 90868376,
+      "weight_files": 1,
+      "evicted_mib": 86.5,
+      "eviction_verified": true,
+      "stage1_disk_to_page_cache_s": 0.09835941799974535,
+      "stage1_gib_s": 0.8603931540919291,
+      "stage2_from_pretrained_cpu_s": 0.1375330950031639,
+      "mmap_active": true,
+      "stage2b_materialize_cpu_s": 0.04568601099890657,
+      "param_bytes": 45426432,
+      "stage3_host_to_device_s": 0.02384578000055626,
+      "oom": false,
+      "pcie_link_during_stage3": [
+        "gen3x4"
+      ],
+      "stage3_gib_s": 1.7741781398993053,
+      "stage4_error": null,
+      "stage4_first_embed_s": 0.2663644349995593,
+      "stage4_warm_embed_s": 0.0024278210003103595,
+      "stage4_all_calls_s": [
+        0.2663644349995593,
+        0.002838047999830451,
+        0.0024635959998704493,
+        0.0024278210003103595,
+        0.002452753997204127
+      ],
+      "stage4_warmup_overhead_s": 0.26393661399924895,
+      "ready_at": 1785548473.3721714,
+      "run": 2,
+      "size_class": "small"
+    },
+    {
+      "model_id": "sentence-transformers/all-MiniLM-L6-v2",
+      "device_index": 1,
+      "weight_bytes": 90868376,
+      "weight_files": 1,
+      "evicted_mib": 86.68359375,
+      "eviction_verified": true,
+      "stage1_disk_to_page_cache_s": 0.09336813000118127,
+      "stage1_gib_s": 0.906388184987497,
+      "stage2_from_pretrained_cpu_s": 0.14083202699839603,
+      "mmap_active": true,
+      "stage2b_materialize_cpu_s": 0.030997963000118034,
+      "param_bytes": 45426432,
+      "stage3_host_to_device_s": 0.023212348998640664,
+      "oom": false,
+      "pcie_link_during_stage3": [
+        "gen3x4"
+      ],
+      "stage3_gib_s": 1.8225928624592227,
+      "stage4_error": null,
+      "stage4_first_embed_s": 0.26674923000246054,
+      "stage4_warm_embed_s": 0.002418765998299932,
+      "stage4_all_calls_s": [
+        0.26674923000246054,
+        0.0027984480002487544,
+        0.0024484589994244743,
+        0.002418765998299932,
+        0.0024774759986030404
+      ],
+      "stage4_warmup_overhead_s": 0.2643304640041606,
+      "ready_at": 1785548478.2070625,
+      "run": 3,
+      "size_class": "small"
+    },
+    {
+      "model_id": "sentence-transformers/all-MiniLM-L6-v2",
+      "device_index": 1,
+      "weight_bytes": 90868376,
+      "weight_files": 1,
+      "evicted_mib": 86.66015625,
+      "eviction_verified": true,
+      "stage1_disk_to_page_cache_s": 0.09982442499676836,
+      "stage1_gib_s": 0.8477661643449189,
+      "stage2_from_pretrained_cpu_s": 0.1413359460020729,
+      "mmap_active": true,
+      "stage2b_materialize_cpu_s": 0.05732425099995453,
+      "param_bytes": 45426432,
+      "stage3_host_to_device_s": 0.02346213000055286,
+      "oom": false,
+      "pcie_link_during_stage3": [
+        "gen3x4"
+      ],
+      "stage3_gib_s": 1.803189292908958,
+      "stage4_error": null,
+      "stage4_first_embed_s": 0.2659506180025346,
+      "stage4_warm_embed_s": 0.0024831840019032825,
+      "stage4_all_calls_s": [
+        0.2659506180025346,
+        0.002828325999871595,
+        0.002488165002432652,
+        0.0024831840019032825,
+        0.0025313840014860034
+      ],
+      "stage4_warmup_overhead_s": 0.26346743400063133,
+      "ready_at": 1785548483.0656557,
+      "run": 4,
+      "size_class": "small"
+    }
+  ]
+}
