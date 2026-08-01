@@ -62,6 +62,7 @@ class Engine:
         # backend makes concurrent requests interleave batch by batch per
         # device instead of oversubscribing VRAM.
         self._backend_locks = [threading.Lock() for _ in self._backends]
+        self._closed = False
 
     @property
     def devices_with_budgets(self) -> list[tuple[DeviceInfo, int]]:
@@ -73,6 +74,20 @@ class Engine:
         """Per-worker truncation counters; 0 for backends without one."""
         return [int(getattr(backend, "truncated_count", 0)) for backend in self._backends]
 
+    def close(self) -> None:
+        """Drop the backends, making this engine permanently unusable.
+
+        The registry needs this for eviction: CUDA memory comes back only
+        when the last Python reference to a model's tensors is gone, and the
+        engine holds one per backend. Clearing the entry's own list is not
+        enough — `torch.cuda.empty_cache()` would run while the engine still
+        pinned every weight. Idempotent.
+        """
+        self._backends = []
+        self._backend_locks = []
+        self._budgets = []
+        self._closed = True
+
     def token_count(self, texts: list[str]) -> int:
         """Total input length in the engine's own unit.
 
@@ -83,6 +98,10 @@ class Engine:
 
     def embed(self, texts: list[str]) -> np.ndarray:
         """Embed `texts`; row i of the result corresponds to `texts[i]`."""
+        if self._closed:
+            # Reachable only by holding an Engine across its eviction, which
+            # is why the registry hands out references through `acquire`.
+            raise RuntimeError("engine is closed: its model was evicted and its backends released")
         if not texts:
             return np.empty((0, 0), dtype=np.float32)
 
