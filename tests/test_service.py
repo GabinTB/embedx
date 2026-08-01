@@ -22,6 +22,9 @@ GIB = 2**30
 class FakeRegistry:
     """Registry double for serve: starts, stops, loads nothing."""
 
+    in_flight_loads = 0
+    max_concurrent_loads = 2
+
     def start(self) -> None: ...
 
     def stop(self, timeout: float = 5.0) -> None: ...

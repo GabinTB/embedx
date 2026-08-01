@@ -372,3 +372,62 @@ def test_removed_keys_in_a_config_file_are_also_rejected(
 
 def test_a_clean_environment_still_constructs() -> None:
     assert Settings().port == 8477
+
+
+# --------------------------------------------------------------------------- #
+# Concurrency caps
+# --------------------------------------------------------------------------- #
+
+
+def test_concurrency_defaults_are_positive_and_consistent() -> None:
+    settings = make_settings()
+    assert settings.max_concurrent_requests > 0
+    assert settings.request_queue_timeout_s > 0
+    assert settings.max_concurrent_loads > 0
+    assert settings.max_concurrent_loads <= settings.max_concurrent_requests
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"max_concurrent_requests": 0},
+        {"max_concurrent_requests": -1},
+        {"request_queue_timeout_s": 0},
+        {"request_queue_timeout_s": -0.5},
+        {"max_concurrent_loads": 0},
+        {"max_concurrent_loads": -1},
+    ],
+)
+def test_concurrency_bounds_are_enforced(overrides: dict[str, float]) -> None:
+    with pytest.raises(ValidationError, match=next(iter(overrides))):
+        make_settings(**overrides)
+
+
+def test_a_load_cap_above_the_request_cap_is_rejected() -> None:
+    # It could never bind: a load runs inside a request and holds a request
+    # slot for its whole duration. Accepting it would leave an operator
+    # believing they had raised a limit that does nothing.
+    with pytest.raises(ValidationError, match="never bind"):
+        make_settings(max_concurrent_requests=2, max_concurrent_loads=3)
+
+
+def test_a_load_cap_equal_to_the_request_cap_is_allowed() -> None:
+    settings = make_settings(max_concurrent_requests=3, max_concurrent_loads=3)
+    assert settings.max_concurrent_loads == 3
+
+
+def test_raising_the_request_cap_makes_a_larger_load_cap_valid() -> None:
+    settings = make_settings(max_concurrent_requests=16, max_concurrent_loads=4)
+    assert (settings.max_concurrent_requests, settings.max_concurrent_loads) == (16, 4)
+
+
+def test_concurrency_settings_come_from_the_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("EMBEDX_MAX_CONCURRENT_REQUESTS", "12")
+    monkeypatch.setenv("EMBEDX_REQUEST_QUEUE_TIMEOUT_S", "2.5")
+    monkeypatch.setenv("EMBEDX_MAX_CONCURRENT_LOADS", "3")
+    settings = make_settings()
+    assert settings.max_concurrent_requests == 12
+    assert settings.request_queue_timeout_s == 2.5
+    assert settings.max_concurrent_loads == 3

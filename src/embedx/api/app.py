@@ -5,10 +5,11 @@ from __future__ import annotations
 import base64
 import logging
 import secrets
-from collections.abc import Callable
-from contextlib import AbstractContextManager
+from collections.abc import AsyncIterator, Callable
+from contextlib import AbstractContextManager, asynccontextmanager
 from typing import Annotated, Any, Protocol, TypeVar
 
+import anyio
 import numpy as np
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.concurrency import run_in_threadpool
@@ -67,6 +68,18 @@ _REGISTRY_ERROR_STATUS: tuple[tuple[type[RegistryError], int], ...] = (
 )
 
 
+class _InFlight:
+    """Live in-flight request count.
+
+    A plain object rather than a nonlocal int so the /info handler reads the
+    same cell the routes mutate. Mutated only from the event loop, never
+    from a worker thread, so it needs no lock.
+    """
+
+    def __init__(self) -> None:
+        self.count = 0
+
+
 class ModelSource(Protocol):
     """What the HTTP layer needs from a model registry.
 
@@ -84,6 +97,12 @@ class ModelSource(Protocol):
     ) -> AbstractContextManager[Engine]: ...
 
     def list_loaded(self) -> list[ModelStatus]: ...
+
+    @property
+    def in_flight_loads(self) -> int: ...
+
+    @property
+    def max_concurrent_loads(self) -> int: ...
 
 
 class _BodyLimitMiddleware:
@@ -152,12 +171,25 @@ def create_app(settings: Settings, registry: ModelSource) -> FastAPI:
     app = FastAPI(title="embedx", version=__version__)
     install_error_handlers(app)
 
+    # Bounded admission. Without this, N concurrent requests mean N
+    # schedulers and up to N x devices worker threads contending on the
+    # per-backend locks, and the only feedback a client gets is everything
+    # slowing down together. A semaphore plus a timeout turns that into a
+    # definite answer.
+    #
+    # Separate from the registry's cold-load semaphore on purpose: sharing
+    # one would let slow cold loads fill the cap and starve requests to
+    # models that are already resident.
+    request_slots = anyio.Semaphore(settings.max_concurrent_requests)
+    in_flight = _InFlight()
+
     # No model is resident at startup, so there is no pooling or dtype to
     # report here. Each model's pooling is logged at WARNING by the registry
     # when it is first resolved; duplicating it here would only be a guess.
     logger.info(
         "embedx ready on %s:%d, no models loaded (api key %s, normalize=%s, "
-        "wrapping=%r, default_keep_alive_s=%s, max_loaded_models=%s)",
+        "wrapping=%r, default_keep_alive_s=%s, max_loaded_models=%s, "
+        "max_concurrent_requests=%d, max_concurrent_loads=%d)",
         settings.host,
         settings.port,
         "set" if settings.api_key else "NOT set - open access",
@@ -165,9 +197,43 @@ def create_app(settings: Settings, registry: ModelSource) -> FastAPI:
         settings.wrapping,
         settings.default_keep_alive_s,
         settings.max_loaded_models if settings.max_loaded_models is not None else "unlimited",
+        settings.max_concurrent_requests,
+        settings.max_concurrent_loads,
     )
     if settings.is_exposed_without_auth:
         logger.warning(settings.exposure_warning())
+
+    @asynccontextmanager
+    async def _request_slot(model_id: str) -> AsyncIterator[None]:
+        try:
+            with anyio.fail_after(settings.request_queue_timeout_s):
+                await request_slots.acquire()
+        except TimeoutError:
+            logger.warning(
+                "queue timeout after %.1fs for model %s (%d/%d slots in use)",
+                settings.request_queue_timeout_s,
+                model_id,
+                in_flight.count,
+                settings.max_concurrent_requests,
+            )
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    f"server busy: no request slot within "
+                    f"{settings.request_queue_timeout_s}s "
+                    f"(max_concurrent_requests={settings.max_concurrent_requests}). "
+                    "Retry shortly."
+                ),
+            ) from None
+        in_flight.count += 1
+        try:
+            yield
+        finally:
+            # finally, not just after a successful return: a slot leaked on
+            # an error path is permanent, and the server would degrade to a
+            # smaller and smaller cap with no sign of why.
+            in_flight.count -= 1
+            request_slots.release()
 
     async def require_auth(
         credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer)] = None,
@@ -217,6 +283,15 @@ def create_app(settings: Settings, registry: ModelSource) -> FastAPI:
             return work(model_engine)
 
     async def _run(request: EmbeddingsRequest | EmbedRequest, work: Callable[[Engine], T]) -> T:
+        # The slot is held across the whole dispatch, load included: a cold
+        # load is the most expensive thing a request can do, so admitting it
+        # unbounded would defeat the cap.
+        async with _request_slot(request.model):
+            return await _dispatch(request, work)
+
+    async def _dispatch(
+        request: EmbeddingsRequest | EmbedRequest, work: Callable[[Engine], T]
+    ) -> T:
         try:
             return await run_in_threadpool(_use_model, request, work)
         except RegistryError as exc:
@@ -315,6 +390,16 @@ def create_app(settings: Settings, registry: ModelSource) -> FastAPI:
             "wrapping": settings.wrapping,
             "default_keep_alive_s": settings.default_keep_alive_s,
             "max_loaded_models": settings.max_loaded_models,
+            # A ceiling nobody can see is one people meet as an unexplained
+            # 503. This endpoint takes no request slot, so in_flight_requests
+            # counts other traffic, not this call.
+            "concurrency": {
+                "in_flight_requests": in_flight.count,
+                "max_concurrent_requests": settings.max_concurrent_requests,
+                "in_flight_loads": source.in_flight_loads,
+                "max_concurrent_loads": source.max_concurrent_loads,
+                "request_queue_timeout_s": settings.request_queue_timeout_s,
+            },
             "models": [
                 {
                     "model_id": status.model_id,

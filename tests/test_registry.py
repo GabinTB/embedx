@@ -822,3 +822,178 @@ def test_engine_batching_budgets_come_from_the_given_settings() -> None:
     )
     engine = registry.get_or_load("org/model", pooling=Pooling.MEAN)
     assert [budget for _, budget in engine.devices_with_budgets] == [4096]
+
+
+# --------------------------------------------------------------------------- #
+# max_concurrent_loads
+# --------------------------------------------------------------------------- #
+
+
+class LoadProbe:
+    """Records how many cold loads overlap, and the high-water mark."""
+
+    def __init__(self) -> None:
+        self.current = 0
+        self.peak = 0
+        self._lock = threading.Lock()
+
+    def enter(self) -> None:
+        with self._lock:
+            self.current += 1
+            self.peak = max(self.peak, self.current)
+
+    def exit(self) -> None:
+        with self._lock:
+            self.current -= 1
+
+
+class ProbedFactory(StubFactory):
+    """Backend factory that reports overlap and can be held open."""
+
+    def __init__(self, probe: LoadProbe, delay_s: float = 0.1, gate: Any = None) -> None:
+        super().__init__()
+        self.probe = probe
+        self.load_delay_s = delay_s
+        self.gate = gate
+
+    def __call__(self, **kwargs: Any) -> StubBackend:
+        self.probe.enter()
+        try:
+            if self.gate is not None:
+                self.gate.wait(5.0)
+            time.sleep(self.load_delay_s)
+            return super().__call__(**kwargs)
+        finally:
+            self.probe.exit()
+
+
+def concurrent_loads(registry: ModelRegistry, model_ids: list[str]) -> list[BaseException | None]:
+    errors: list[BaseException | None] = [None] * len(model_ids)
+
+    def worker(index: int, model_id: str) -> None:
+        try:
+            with registry.acquire(model_id, pooling=Pooling.MEAN):
+                pass
+        except BaseException as exc:  # surfaced by the caller's assert
+            errors[index] = exc
+
+    threads = [
+        threading.Thread(target=worker, args=(index, model_id))
+        for index, model_id in enumerate(model_ids)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(30)
+    return errors
+
+
+def test_cold_loads_are_capped_independently_of_requests() -> None:
+    probe = LoadProbe()
+    factory = ProbedFactory(probe, delay_s=0.1)
+    registry = ModelRegistry(
+        make_devices(1),
+        settings=Settings(max_concurrent_loads=2, max_concurrent_requests=8),
+        backend_factory=factory,
+        weight_file_lister=safetensors_listing,
+    )
+    errors = concurrent_loads(registry, [f"org/model-{index}" for index in range(6)])
+
+    assert errors == [None] * 6
+    assert len(registry.list_loaded()) == 6, "every model must still load, just not at once"
+    assert probe.peak <= 2, f"load cap breached: {probe.peak} loads ran at once"
+    assert probe.peak > 1, "loads never overlapped; the test proves nothing"
+
+
+def test_a_cap_of_one_serialises_loads_completely() -> None:
+    probe = LoadProbe()
+    factory = ProbedFactory(probe, delay_s=0.05)
+    registry = ModelRegistry(
+        make_devices(1),
+        settings=Settings(max_concurrent_loads=1, max_concurrent_requests=4),
+        backend_factory=factory,
+        weight_file_lister=safetensors_listing,
+    )
+    assert concurrent_loads(registry, [f"org/model-{i}" for i in range(4)]) == [None] * 4
+    assert probe.peak == 1
+
+
+def test_a_warm_acquire_never_consumes_a_load_slot() -> None:
+    """The test that proves the two caps are actually separate.
+
+    Every cold-load slot is held open by a load that will not finish until
+    released. If a warm acquire touched the load semaphore, this would block
+    until that gate opens, and the load cap would silently have become a
+    second request cap.
+    """
+    probe = LoadProbe()
+    gate = threading.Event()
+    factory = ProbedFactory(probe, delay_s=0.0, gate=gate)
+    registry = ModelRegistry(
+        make_devices(1),
+        settings=Settings(max_concurrent_loads=1, max_concurrent_requests=4),
+        backend_factory=factory,
+        weight_file_lister=safetensors_listing,
+    )
+
+    # Load one model to completion, so it is warm.
+    gate.set()
+    registry.get_or_load("org/warm", pooling=Pooling.MEAN)
+    assert registry.in_flight_loads == 0
+
+    # Now occupy the only load slot with a cold load that hangs.
+    gate.clear()
+    blocked = threading.Thread(
+        target=lambda: registry.get_or_load("org/cold", pooling=Pooling.MEAN)
+    )
+    blocked.start()
+    try:
+        deadline = time.monotonic() + 5.0
+        while registry.in_flight_loads < 1 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert registry.in_flight_loads == 1, "the cold load never took its slot"
+
+        # The load cap is now fully occupied. A warm acquire must not care.
+        done = threading.Event()
+
+        def warm() -> None:
+            with registry.acquire("org/warm") as engine:
+                engine.embed(["x"])
+            done.set()
+
+        threading.Thread(target=warm).start()
+        assert done.wait(3.0), "a warm acquire blocked on the cold-load semaphore"
+    finally:
+        gate.set()
+        blocked.join(10)
+
+
+def test_in_flight_loads_returns_to_zero_after_a_failed_load() -> None:
+    # A slot leaked on the error path would shrink the cap permanently.
+    probe = LoadProbe()
+
+    class FailingFactory(ProbedFactory):
+        def __call__(self, **kwargs: Any) -> StubBackend:
+            raise ValueError("checkpoint is broken")
+
+    registry = ModelRegistry(
+        make_devices(1),
+        settings=Settings(max_concurrent_loads=1, max_concurrent_requests=2),
+        backend_factory=FailingFactory(probe),
+        weight_file_lister=safetensors_listing,
+    )
+    for _ in range(3):
+        with pytest.raises(ValueError, match="broken"):
+            registry.get_or_load("org/bad", pooling=Pooling.MEAN)
+        assert registry.in_flight_loads == 0
+
+    # The slot survived: a real load still works afterwards.
+    registry._backend_factory = StubFactory()  # type: ignore[assignment]
+    registry.get_or_load("org/good", pooling=Pooling.MEAN)
+    assert [s.model_id for s in registry.list_loaded()] == ["org/good"]
+
+
+def test_load_caps_are_reported_for_info() -> None:
+    registry, _ = make_registry()
+    assert registry.in_flight_loads == 0
+    assert registry.max_concurrent_loads == Settings().max_concurrent_loads

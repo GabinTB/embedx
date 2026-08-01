@@ -29,6 +29,10 @@ classifiers = [
 # package metadata and CLI can be imported and tested without a GPU stack.
 dependencies = [
     "fastapi>=0.115",
+    # Direct: app.py uses anyio's semaphore and fail_after for the request
+    # admission cap. It arrives transitively through starlette anyway, but
+    # imported code is a dependency whether or not something else pulls it.
+    "anyio>=4.0",
     "uvicorn[standard]>=0.30",
     "pydantic>=2.7",
     "pydantic-settings>=2.3",

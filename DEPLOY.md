@@ -64,6 +64,11 @@ still pinned to that model. Delete them, along with `EMBEDX_DTYPE` and
 # Model residency:
 #EMBEDX_DEFAULT_KEEP_ALIVE_S=600    # idle seconds before a model is unloaded
 #EMBEDX_MAX_LOADED_MODELS=3         # unset = no cap
+
+# Concurrency:
+#EMBEDX_MAX_CONCURRENT_REQUESTS=8   # in-flight embedding requests
+#EMBEDX_REQUEST_QUEUE_TIMEOUT_S=30  # queued longer than this -> 503
+#EMBEDX_MAX_CONCURRENT_LOADS=2      # simultaneous cold model loads
 ```
 
 `EMBEDX_DEFAULT_KEEP_ALIVE_S` is how long an idle model stays on the GPU
@@ -73,6 +78,35 @@ finishes. `EMBEDX_MAX_LOADED_MODELS` caps how many models are resident at
 once: at the cap, a new load evicts the least-recently-used model that no
 request is using. If every resident model is busy the new load fails with
 503 rather than pulling a model out from under a request in flight.
+
+## Concurrency and backpressure
+
+Two caps, and they are separate on purpose.
+
+`EMBEDX_MAX_CONCURRENT_REQUESTS` bounds embedding requests in flight. Beyond
+it, requests queue; a request that waits longer than
+`EMBEDX_REQUEST_QUEUE_TIMEOUT_S` gets **503** rather than queueing forever,
+so a client always gets a definite answer. The default of 8 is not a
+throughput target: `Engine` holds a per-device lock across each embed, so
+actual GPU parallelism is capped at your device count regardless. Admitting
+more only overlaps tokenizing and output assembly with GPU work, and bounds
+thread count and the memory held by in-flight inputs.
+
+`EMBEDX_MAX_CONCURRENT_LOADS` bounds *cold model loads* — the expensive case,
+which contends for VRAM and PCIe bandwidth. It has its own semaphore, not a
+share of the request cap. If the two were merged, a handful of slow cold
+loads would fill the request cap and requests to already-resident models
+would queue behind them, which is the opposite of what a cap is for. A
+request to a warm model never waits on the load cap.
+
+A load cap larger than the request cap is rejected at startup rather than
+accepted and ignored: every load runs inside a request and holds a request
+slot while it does, so the larger number could never bind.
+
+Both are visible in `GET /info` under `concurrency`, alongside live
+`in_flight_requests` and `in_flight_loads`. Check there first when clients
+report unexplained 503s — `/info` itself never consumes a request slot, so
+it still answers when every slot is busy.
 
 ## The safety floor
 
@@ -153,7 +187,8 @@ You want to see, in order:
   preflight; if this fails the unit stops before crash-looping serve),
 - `binding http://<host>:<port>`,
 - `api key: set` (or `not set (open access)` — see Binding),
-- `normalize=... wrapping=... default_keep_alive_s=... max_loaded_models=...`,
+- `normalize=... wrapping=... default_keep_alive_s=... max_loaded_models=...`
+  and the two concurrency caps,
 - one `device N: <name> (weight ..., max_batch_tokens ...)` line per card,
 - `no models loaded; each is loaded on the first request that names it`.
 

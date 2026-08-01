@@ -222,6 +222,56 @@ class Settings(BaseSettings):
         "than refusing; if every resident model is in use, the load fails instead.",
     )
 
+    # Concurrency. Two separate caps, deliberately: see the comment on
+    # max_concurrent_loads for why sharing one would starve warm requests.
+    #
+    # 8 is not scaled to device count, though that would be the obvious
+    # move, because Settings is constructed before any device is discovered
+    # and must stay importable without torch -- scaling here would mean
+    # either a CUDA call in config or a default that lies until something
+    # else corrects it. The number is chosen against what concurrency can
+    # actually buy: Engine holds a per-backend lock across embed, so real
+    # GPU parallelism is capped at the device count no matter how many
+    # requests are admitted. Everything above that only overlaps CPU work
+    # (tokenizing, assembling the output array) with GPU work, and a couple
+    # of requests' worth of overlap saturates that. 8 covers the 1-4 device
+    # boxes this targets with room to spare, while bounding both the thread
+    # count (requests x devices worker threads) and the memory held by
+    # in-flight inputs, which at max_request_items=2048 each is not small.
+    max_concurrent_requests: int = Field(
+        default=8,
+        gt=0,
+        description="Max embedding requests in flight at once; the rest queue.",
+    )
+    # 30s, not a few seconds: a queued request may be waiting behind one
+    # that is doing a cold load, measured at ~9.4s for MiniLM on the
+    # reference two-GPU host. A timeout below that would turn a normal cold
+    # start into a 503 storm. It is a backpressure valve, not a latency
+    # target -- it exists so a client gets a definite answer instead of an
+    # unbounded queue, and 30s leaves room for a couple of loads ahead.
+    request_queue_timeout_s: float = Field(
+        default=30.0,
+        gt=0,
+        description="Seconds a queued request waits for a slot before returning 503.",
+    )
+    # Cold loads get their own, smaller cap and their own semaphore. They
+    # must not share the request cap: N slow cold loads would fill it and
+    # starve every request to an already-resident model, which is the
+    # opposite of what a cap is for. A request to a warm model should never
+    # wait behind a cold load of a different one.
+    #
+    # 2 is a starting point, not a measurement: it allows one load to
+    # overlap another's download/CPU phase while keeping at most two
+    # simultaneous claims on VRAM and PCIe bandwidth. Task 17's benchmark
+    # gives the real number -- how much a second simultaneous load degrades
+    # an in-flight one on this hardware -- and this should be revisited
+    # then, the same loop as default_keep_alive_s.
+    max_concurrent_loads: int = Field(
+        default=2,
+        gt=0,
+        description="Max cold model loads running at once; warm requests never queue here.",
+    )
+
     @classmethod
     def settings_customise_sources(
         cls,
@@ -350,6 +400,22 @@ class Settings(BaseSettings):
             if budget <= 0:
                 raise ValueError(f"token budget for index {index} must be > 0, got {budget}")
         return value
+
+    @model_validator(mode="after")
+    def _check_load_cap_can_bind(self) -> Settings:
+        # A cold load happens inside a request and holds a request slot for
+        # its whole duration, so in-flight loads can never exceed in-flight
+        # requests. A larger load cap is unreachable by construction:
+        # accepting it silently would leave an operator believing they had
+        # raised a limit that does nothing.
+        if self.max_concurrent_loads > self.max_concurrent_requests:
+            raise ValueError(
+                f"max_concurrent_loads={self.max_concurrent_loads} exceeds "
+                f"max_concurrent_requests={self.max_concurrent_requests}, so it can "
+                "never bind: every load runs inside a request and holds a request "
+                "slot while it does. Lower it, or raise max_concurrent_requests."
+            )
+        return self
 
     @model_validator(mode="after")
     def _check_override_keys_in_devices(self) -> Settings:

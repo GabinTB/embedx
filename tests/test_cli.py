@@ -55,6 +55,8 @@ class FakeRegistry:
         self.started = False
         self.stopped = False
         self.evicted = False
+        self.in_flight_loads = 0
+        self.max_concurrent_loads = 2
 
     @contextmanager
     def acquire(self, model_id: str, pooling: Any = None, **kwargs: Any) -> Iterator[FakeEngine]:

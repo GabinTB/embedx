@@ -384,8 +384,55 @@ class ModelRegistry:
         self._load_locks: dict[str, threading.Lock] = {}
         self._load_locks_lock = threading.Lock()
 
+        # Cold loads only. This lives in the registry rather than being
+        # injected because the registry is the only place that knows which
+        # acquisitions are cold: the HTTP layer sees one `acquire()` call
+        # and cannot tell a 9-second load from a dictionary lookup. It is
+        # taken deep inside `_entry_for`, past both resident checks, so a
+        # warm acquire never touches it -- if it did, this would silently
+        # become a second request cap and warm requests would queue behind
+        # cold loads, which is exactly what the separate caps prevent.
+        #
+        # No timeout on acquiring it: the request semaphore in the API layer
+        # is what bounds how long a caller waits, and it also bounds how
+        # many callers can be queued here at all.
+        self._load_slots = threading.Semaphore(self._settings.max_concurrent_loads)
+        self._in_flight_loads = 0
+        self._loads_lock = threading.Lock()
+
         self._reaper: threading.Thread | None = None
         self._stop = threading.Event()
+
+    @property
+    def max_concurrent_loads(self) -> int:
+        """The configured cold-load cap; read by /info."""
+        return self._settings.max_concurrent_loads
+
+    @property
+    def in_flight_loads(self) -> int:
+        """Cold loads running right now; read by /info."""
+        return self._in_flight_loads
+
+    @contextmanager
+    def _cold_load_slot(self, model_id: str) -> Iterator[None]:
+        """Hold one of the cold-load slots. Reached only on a real load."""
+        waiting = self._load_slots.acquire(blocking=False)
+        if not waiting:
+            logger.info(
+                "%s is waiting for a cold-load slot (%d/%d in use)",
+                model_id,
+                self._in_flight_loads,
+                self._settings.max_concurrent_loads,
+            )
+            self._load_slots.acquire()
+        with self._loads_lock:
+            self._in_flight_loads += 1
+        try:
+            yield
+        finally:
+            with self._loads_lock:
+                self._in_flight_loads -= 1
+            self._load_slots.release()
 
     # ------------------------------------------------------------------ #
     # Public API
@@ -538,10 +585,16 @@ class ModelRegistry:
                 raise PoolingRequiredError(model_id)
 
             # Before anything constructs a backend, and therefore before
-            # anything hands a file to torch.load.
+            # anything hands a file to torch.load. Deliberately OUTSIDE the
+            # cold-load slot below: this is a metadata listing that contends
+            # for neither VRAM nor PCIe, and holding a scarce slot through a
+            # network round-trip would bound the wrong thing.
             self._check_weight_format(model_id, self._settings.revision)
-            self._make_room_for(model_id)
-            entry = self._load(model_id, pooling, dtype, max_seq_len, keep_alive)
+
+            # Everything that touches device memory is inside the slot.
+            with self._cold_load_slot(model_id):
+                self._make_room_for(model_id)
+                entry = self._load(model_id, pooling, dtype, max_seq_len, keep_alive)
 
             with self._entries_lock:
                 self._entries[model_id] = entry

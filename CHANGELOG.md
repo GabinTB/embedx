@@ -56,6 +56,19 @@ startup. A server is now configured without naming a checkpoint.
   is refused with 503, after falling back to the local HF cache so an
   air-gapped host still serves what it has already downloaded.
 - `EMBEDX_WRAPPING`: a template applied to every input, e.g. `"Q: {text}"`.
+- Bounded admission. `EMBEDX_MAX_CONCURRENT_REQUESTS` (default 8) caps
+  in-flight embedding requests; a request queued longer than
+  `EMBEDX_REQUEST_QUEUE_TIMEOUT_S` (default 30s) returns 503 instead of
+  queueing indefinitely. Previously nothing capped in-flight requests at
+  all.
+- `EMBEDX_MAX_CONCURRENT_LOADS` (default 2) separately caps simultaneous
+  cold model loads, which contend for VRAM and PCIe bandwidth. Deliberately
+  a second semaphore rather than a share of the request cap: merging them
+  would let slow cold loads starve requests to already-resident models. A
+  load cap above the request cap is rejected at startup, since it could
+  never bind.
+- `GET /info` reports live `in_flight_requests` and `in_flight_loads` next
+  to both caps and the queue timeout, and takes no request slot itself.
 
 ### Migration
 

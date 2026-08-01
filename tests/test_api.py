@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import logging
-from collections.abc import Iterator
-from contextlib import contextmanager
+import threading
+import time
+from collections.abc import AsyncIterator, Iterator
+from contextlib import asynccontextmanager, contextmanager
 from typing import Any
 
+import httpx
 import numpy as np
 import pytest
 from fastapi.testclient import TestClient
@@ -444,6 +448,8 @@ class FakeRegistry:
         self.exited = 0
         self.loads = 0
         self.list_loaded_calls = 0
+        self.in_flight_loads = 0
+        self.max_concurrent_loads = 2
         self._resident: set[str] = {status.model_id for status in self.statuses}
 
     @contextmanager
@@ -805,3 +811,238 @@ def test_unverifiable_weight_format_is_503_not_400() -> None:
     )
     pickled = client.post("/v1/embeddings", json={"input": "x", "model": "org/x"})
     assert pickled.status_code == 400
+
+
+# --------------------------------------------------------------------------- #
+# Concurrency caps
+# --------------------------------------------------------------------------- #
+#
+# These use httpx.ASGITransport rather than TestClient, and it matters:
+# TestClient runs each call in its own event-loop portal, so driving it from
+# a thread pool gives every request a DIFFERENT loop. The admission
+# semaphore is an async primitive bound to one loop, so that setup would
+# measure the harness, not the cap. uvicorn serves every request on a single
+# loop; asyncio.gather against an ASGI transport is the same shape.
+
+
+class ConcurrencyProbe:
+    """Counts overlapping entries and remembers the high-water mark.
+
+    Concurrency is asserted on this, never on wall-clock timing: a timing
+    assertion on a loaded CI box measures the box, not the cap.
+    """
+
+    def __init__(self) -> None:
+        self.current = 0
+        self.peak = 0
+        self.total = 0
+        self._lock = threading.Lock()
+
+    @contextmanager
+    def enter(self) -> Iterator[None]:
+        with self._lock:
+            self.current += 1
+            self.total += 1
+            self.peak = max(self.peak, self.current)
+        try:
+            yield
+        finally:
+            with self._lock:
+                self.current -= 1
+
+
+class SlowEngine(FakeEngine):
+    """Engine whose embed takes long enough for overlap to be observable."""
+
+    def __init__(self, probe: ConcurrencyProbe, delay_s: float = 0.05) -> None:
+        super().__init__()
+        self.probe = probe
+        self.delay_s = delay_s
+
+    def embed(self, texts: list[str]) -> np.ndarray:
+        with self.probe.enter():
+            time.sleep(self.delay_s)  # in the threadpool, not on the loop
+            return super().embed(texts)
+
+
+@asynccontextmanager
+async def async_client(
+    registry: FakeRegistry | None = None, **settings_overrides: object
+) -> AsyncIterator[tuple[httpx.AsyncClient, FakeRegistry]]:
+    registry = registry or FakeRegistry()
+    app = create_app(make_settings(**settings_overrides), registry)  # type: ignore[arg-type]
+    # raise_app_exceptions=False mirrors TestClient(raise_server_exceptions
+    # =False): an unhandled error must come back as the 500 envelope a real
+    # client would see, not explode inside the test.
+    transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+    async with httpx.AsyncClient(transport=transport, base_url="http://embedx") as client:
+        yield client, registry
+
+
+async def post_many(client: httpx.AsyncClient, count: int, model: str = "org/model") -> list[int]:
+    body = {"input": "x", "model": model}
+    responses = await asyncio.gather(
+        *(client.post("/v1/embeddings", json=body) for _ in range(count))
+    )
+    return [response.status_code for response in responses]
+
+
+async def test_concurrent_requests_are_capped_and_the_excess_still_succeeds() -> None:
+    probe = ConcurrencyProbe()
+    async with async_client(FakeRegistry(engine=SlowEngine(probe)), max_concurrent_requests=2) as (
+        client,
+        _,
+    ):
+        statuses = await post_many(client, 8)
+
+    assert statuses == [200] * 8, "queued requests must succeed, not be rejected"
+    assert probe.total == 8
+    assert probe.peak <= 2, f"cap breached: {probe.peak} requests were in flight at once"
+    assert probe.peak > 1, "test did not actually overlap; it proves nothing"
+
+
+async def test_without_the_cap_requests_really_do_overlap() -> None:
+    # Control for the test above: the same load with a wide cap reaches a
+    # higher peak, so `peak <= 2` there is the cap doing something rather
+    # than the requests never having overlapped.
+    probe = ConcurrencyProbe()
+    async with async_client(FakeRegistry(engine=SlowEngine(probe)), max_concurrent_requests=8) as (
+        client,
+        _,
+    ):
+        assert await post_many(client, 8) == [200] * 8
+    assert probe.peak > 2
+
+
+async def test_a_request_that_cannot_get_a_slot_in_time_returns_503() -> None:
+    probe = ConcurrencyProbe()
+    # A long embed against a 1-slot cap and a near-zero timeout: the queued
+    # requests cannot possibly get in. The short timeout also bounds this
+    # test, so a regression fails fast instead of hanging the suite.
+    async with async_client(
+        FakeRegistry(engine=SlowEngine(probe, delay_s=1.0)),
+        max_concurrent_requests=1,
+        max_concurrent_loads=1,
+        request_queue_timeout_s=0.05,
+    ) as (client, _):
+        statuses = await post_many(client, 4)
+
+    assert 200 in statuses, "the request holding the slot should still succeed"
+    assert statuses.count(503) == 3, "queued requests must be rejected, not queued forever"
+    assert set(statuses) <= {200, 503}
+
+
+async def test_the_503_names_the_timeout_and_uses_the_standard_envelope() -> None:
+    probe = ConcurrencyProbe()
+    async with async_client(
+        FakeRegistry(engine=SlowEngine(probe, delay_s=1.0)),
+        max_concurrent_requests=1,
+        max_concurrent_loads=1,
+        request_queue_timeout_s=0.05,
+    ) as (client, _):
+        body = {"input": "x", "model": "m"}
+        first, second = await asyncio.gather(
+            client.post("/v1/embeddings", json=body),
+            client.post("/v1/embeddings", json=body),
+        )
+
+    rejected = second if second.status_code == 503 else first
+    assert rejected.status_code == 503
+    _assert_envelope(rejected.json())
+    message = rejected.json()["error"]["message"]
+    assert "0.05" in message
+    assert "max_concurrent_requests=1" in message
+
+
+async def test_a_failing_request_does_not_leak_its_slot() -> None:
+    # The test that catches a missing `finally`. With a cap of 1, a leaked
+    # slot makes the very next request hang until the queue timeout; several
+    # failures in a row would leave the server permanently at zero capacity.
+    registry = FakeRegistry(engine=ExplodingEngine())
+    async with async_client(
+        registry,
+        max_concurrent_requests=1,
+        max_concurrent_loads=1,
+        request_queue_timeout_s=1.0,
+    ) as (client, _):
+        for _ in range(5):
+            failed = await client.post("/v1/embeddings", json={"input": "x", "model": "m"})
+            assert failed.status_code == 500
+
+        # A leaked slot shows up here: with the cap at 1 and five slots
+        # lost, this would 503 on the queue timeout instead of succeeding.
+        registry.engine = FakeEngine()
+        ok = await client.post("/v1/embeddings", json={"input": "x", "model": "m"})
+        assert ok.status_code == 200
+
+
+async def test_a_registry_error_does_not_leak_its_slot_either() -> None:
+    # HTTPException is raised from inside the slot's `async with`; an
+    # `except` that returned early instead of unwinding would leak here.
+    registry = FakeRegistry(raises=PoolingRequiredError("org/x"))
+    async with async_client(
+        registry,
+        max_concurrent_requests=1,
+        max_concurrent_loads=1,
+        request_queue_timeout_s=1.0,
+    ) as (client, _):
+        for _ in range(5):
+            refused = await client.post("/v1/embeddings", json={"input": "x", "model": "org/x"})
+            assert refused.status_code == 400
+        registry.raises = None
+        ok = await client.post("/v1/embeddings", json={"input": "x", "model": "org/x"})
+        assert ok.status_code == 200
+
+
+async def test_info_reports_live_counts_and_configured_caps() -> None:
+    probe = ConcurrencyProbe()
+    async with async_client(
+        FakeRegistry(engine=SlowEngine(probe, delay_s=0.3)),
+        max_concurrent_requests=3,
+        max_concurrent_loads=2,
+        request_queue_timeout_s=7.5,
+    ) as (client, _):
+        idle = (await client.get("/info")).json()["concurrency"]
+        assert idle == {
+            "in_flight_requests": 0,
+            "max_concurrent_requests": 3,
+            "in_flight_loads": 0,
+            "max_concurrent_loads": 2,
+            "request_queue_timeout_s": 7.5,
+        }
+
+        body = {"input": "x", "model": "m"}
+        busy = asyncio.gather(
+            client.post("/v1/embeddings", json=body),
+            client.post("/v1/embeddings", json=body),
+        )
+        await asyncio.sleep(0.1)
+        during = (await client.get("/info")).json()["concurrency"]
+        await busy
+        after = (await client.get("/info")).json()["concurrency"]
+
+    assert during["in_flight_requests"] == 2
+    assert after["in_flight_requests"] == 0
+
+
+async def test_info_does_not_consume_a_request_slot() -> None:
+    # With every slot held, /info must still answer. If it took a slot it
+    # would 503 exactly when an operator most needs to see the counts.
+    probe = ConcurrencyProbe()
+    async with async_client(
+        FakeRegistry(engine=SlowEngine(probe, delay_s=0.4)),
+        max_concurrent_requests=1,
+        max_concurrent_loads=1,
+        request_queue_timeout_s=0.05,
+    ) as (client, _):
+        held = asyncio.ensure_future(
+            client.post("/v1/embeddings", json={"input": "x", "model": "m"})
+        )
+        await asyncio.sleep(0.1)
+        info = await client.get("/info")
+        health = await client.get("/health")
+        assert (await held).status_code == 200
+
+    assert info.status_code == 200
+    assert info.json()["concurrency"]["in_flight_requests"] == 1
+    assert health.status_code == 200

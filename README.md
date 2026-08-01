@@ -58,8 +58,15 @@ vectors = client.embeddings.create(
 ```
 
 There is also a TEI-style `POST /embed` (bare vectors; `model` required,
-unlike TEI), `GET /health`, and `GET /info` (server config plus every
-resident model with its pooling, devices, idle time and truncation count).
+unlike TEI), `GET /health`, and `GET /info` (server config, every resident
+model with its pooling, devices, idle time and truncation count, and live
+concurrency counts).
+
+In-flight requests and cold model loads are separately capped
+(`EMBEDX_MAX_CONCURRENT_REQUESTS`, `EMBEDX_MAX_CONCURRENT_LOADS`) so a
+request to a warm model never queues behind a cold load of another one; past
+`EMBEDX_REQUEST_QUEUE_TIMEOUT_S` a queued request gets a 503 rather than
+waiting forever.
 
 ## Measured results
 
@@ -174,6 +181,9 @@ drift:
 | `EMBEDX_DEVICE_BATCH_TOKENS` | dict[int, int] | {} | Per-device token-budget overrides, e.g. "0=16384,1=4096". |
 | `EMBEDX_DEFAULT_KEEP_ALIVE_S` | float | 600.0 | Seconds an idle model stays resident before it is unloaded. |
 | `EMBEDX_MAX_LOADED_MODELS` | int or None | None | Max models resident at once; unset means no cap. At the cap, a new load evicts the least-recently-used model that no request is using, rather than refusing; if every resident model is in use, the load fails instead. |
+| `EMBEDX_MAX_CONCURRENT_REQUESTS` | int | 8 | Max embedding requests in flight at once; the rest queue. |
+| `EMBEDX_REQUEST_QUEUE_TIMEOUT_S` | float | 30.0 | Seconds a queued request waits for a slot before returning 503. |
+| `EMBEDX_MAX_CONCURRENT_LOADS` | int | 2 | Max cold model loads running at once; warm requests never queue here. |
 
 There is no `EMBEDX_MODEL_ID` or `EMBEDX_POOLING`: a server is configured
 without naming a checkpoint, and every request carries its own `model`.
