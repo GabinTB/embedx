@@ -177,9 +177,89 @@ different cards.
 
 One assumption up front: the host has a working NVIDIA driver (`nvidia-smi`
 lists your cards). The torch wheels pulled in by the `gpu` extra bundle their
-own CUDA runtime, so nothing else CUDA-related needs to be installed
+own CUDA runtime, so nothing else *CUDA-related* needs to be installed
 system-wide — but without the driver there is no GPU, and embedx does not
 serve on CPU.
+
+That is not the same as "nothing else needs to be installed". RoPE-family
+models need a **C toolchain at run time**; see the next section before you
+serve one. The Docker image exists partly because it gets this right for
+you.
+
+### RoPE-family models need a C toolchain at run time
+
+**Symptom:** the model loads cleanly, appears in `/info` as resident, and
+then *every* request raises. Nothing looks wrong until you send traffic.
+Since the load-time smoke test landed, embedx catches this and fails the
+load with a 503 naming the model instead — but the requirement is
+unchanged, and this is still the first thing to check when loads start
+failing on a model like Qwen3.
+
+**Cause:** torch routes RoPE-family models through a Triton kernel that
+**JIT-compiles a C helper at first inference, not at load**. So the compiler
+is needed on the serving host, at request time, long after `pip install`
+finished.
+
+Triton's compile needs three things. Which one is missing depends on how the
+host is put together, and this project has hit two different ones:
+
+| Needed | Provided by | How it fails when absent |
+|---|---|---|
+| A C compiler | `gcc` | `RuntimeError: Failed to find C compiler` |
+| libc headers | `libc6-dev` | `fatal error: stdlib.h: No such file or directory` |
+| Python headers for the venv's interpreter | see below | `fatal error: Python.h: No such file or directory` |
+
+```bash
+sudo apt-get install gcc libc6-dev
+```
+
+`gcc` alone is **not** enough — with `--no-install-recommends` it pulls no
+libc headers, and the compile dies on `stdlib.h`. That is the failure the
+container image hit.
+
+**Python headers depend on where your interpreter came from**, and this is
+the part that catches people:
+
+- **A uv-managed Python** (`uv python install 3.14`, then
+  `uv venv --python 3.14 /opt/embedx/.venv`) **ships its own headers.**
+  Nothing to install. This is what the Docker image does, and it is the
+  path of least resistance here too.
+- **The distro Python** needs the matching `pythonX.Y-dev` package. Check
+  what your venv actually uses before assuming — `home = /usr/bin` in
+  `pyvenv.cfg` means the distro interpreter:
+
+  ```bash
+  grep -E '^(home|version)' /opt/embedx/.venv/pyvenv.cfg
+  sudo apt-get install python3.14-dev      # match YOUR minor version
+  ```
+
+  That package does not exist for every minor version on every release —
+  Ubuntu 24.04 ships `python3.12-dev` and has no `python3.14-dev` at all.
+  If yours is missing, use a uv-managed Python instead of hunting for it.
+
+Verify the whole chain rather than trusting the package list, using the venv
+that will actually serve:
+
+```bash
+/opt/embedx/.venv/bin/python -c "
+import torch, triton, triton.language as tl
+@triton.jit
+def k(x, y, o, n, B: tl.constexpr):
+    i = tl.program_id(0) * B + tl.arange(0, B); m = i < n
+    tl.store(o + i, tl.load(x + i, mask=m) + tl.load(y + i, mask=m), mask=m)
+x = torch.rand(1024, device='cuda'); y = torch.rand(1024, device='cuda'); o = torch.empty_like(x)
+k[(1,)](x, y, o, 1024, B=1024); torch.cuda.synchronize()
+assert torch.allclose(o, x + y); print('triton JIT OK')"
+```
+
+**This can break on a torch upgrade rather than a config change.** Whether
+Triton is invoked *at all* depends on the torch version: torch 2.13 on this
+project's bare-metal host routes Qwen3 through Triton, while the 2.11.0
+pinned in the container image does not take that path for the same model. A
+host with no C toolchain can therefore serve Qwen3 happily for months and
+then fail on every request after a routine `pip install -U torch`, with
+nothing in your own configuration having changed. If you upgrade torch,
+re-run the check above.
 
 With uv, into a dedicated venv (the path the unit file expects):
 

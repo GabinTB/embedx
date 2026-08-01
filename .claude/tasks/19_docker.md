@@ -46,6 +46,17 @@ torch routes RoPE-family models (Qwen3) through a Triton kernel that
 **JIT-compiles a C helper at first inference**, not at load. It needs
 `Python.h` *and a C compiler* present at runtime. Consequences:
 
+> **Corrected after implementation.** Three things are required, not two: a
+> C compiler, **libc headers**, and Python headers. Point 1 below is wrong
+> about which to install. In the image, `Python.h` is already supplied by
+> uv's standalone CPython, so **no Python dev package is needed** (and none
+> exists for 3.14 on Ubuntu 24.04 — that base has only `python3.12-dev`).
+> What the runtime stage actually needs is `gcc` **and `libc6-dev`**: gcc
+> alone fails with `fatal error: stdlib.h: No such file or directory`.
+> The bare-metal host failed the other way round — it had gcc and libc, and
+> was missing `Python.h` because its venv uses the distro Python. Which of
+> the three bites depends on the environment; `DEPLOY.md` has the full list.
+
 1. A slim `nvidia/cuda:*-runtime-*` base has no gcc and no Python headers, so
    it fails exactly the way this project's host failed: model loads clean,
    registers as resident, every request raises. Install the Python dev

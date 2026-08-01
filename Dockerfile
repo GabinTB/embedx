@@ -99,10 +99,14 @@ FROM ${CUDA_IMAGE} AS runtime
 # the model loads clean, registers as resident, and every request raises --
 # which is exactly how this project's bare-metal host failed once already.
 #
-# Measured in this image, not assumed:
-#   - Python.h is ALREADY PRESENT, from uv's standalone CPython at
+# Triton's compile needs three things: a C compiler, libc headers, and
+# Python headers. Measured in this image, not assumed:
+#   - Python.h is ALREADY PRESENT here, from uv's standalone CPython at
 #     /opt/python/.../include/python3.14. No python3-dev is needed, and for
-#     3.14 the distro package does not exist on Ubuntu 24.04 anyway.
+#     3.14 the distro package does not exist on Ubuntu 24.04 anyway (that
+#     base carries only python3.12-dev). This is a property of the uv Python,
+#     NOT a general one: a venv built on a distro interpreter does need the
+#     matching pythonX.Y-dev, which is how the bare-metal host failed.
 #   - gcc alone is NOT enough: with --no-install-recommends it pulls no libc
 #     headers, and the compile dies on `fatal error: stdlib.h: No such file`.
 #     libc6-dev is what fixes it.
