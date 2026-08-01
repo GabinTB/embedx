@@ -27,13 +27,36 @@ from pydantic_settings import (
 
 CONFIG_PATH_ENV_VAR = "EMBEDX_CONFIG"
 
-# Idle seconds before a model is unloaded. Ollama, the closest prior art for
-# keep-alive on a local model server, defaults to 5 minutes and documents
-# roughly 10-15 minutes as the sane range for keeping a model warm without
-# hoarding VRAM; 600s sits at the bottom of that range, which suits a box
-# whose GPUs are shared with other work. Task 17 recalibrates this against
-# measured load latency -- the right value is "long enough that a reload
-# costs less than the memory held", and that number is not yet measured.
+# Idle seconds before a model is unloaded. Measured, not guessed: see
+# dev/04_model_load_latency.ipynb and dev/output/model_load_results.json.
+#
+# What an eviction costs if it turns out to be premature, on the reference
+# two-GPU host, for Qwen3-Embedding-4B (7.49 GiB of weights):
+#
+#   9.363s  reload with a cold page cache
+#   2.981s  reload while the page cache is still warm
+#
+# The gap between those two is stage 1, reading the checkpoint off disk at
+# 6.382s -- 68% of a cold load, and precisely the part a live page cache
+# removes. So a model evicted and wanted again shortly after usually pays
+# the 2.981s figure, not the 9.363s one. Small models (MiniLM, 0.085 GiB)
+# cost 0.548s cold and 0.451s warm, so this default is sized by the large
+# case; the small one is noise either way.
+#
+# The tradeoff, stated plainly. Too short and every lull between requests
+# re-pays that reload: at 60s the worst case is 15.6% of the idle window
+# spent reloading, at 300s it is 3.1%. Too long and idle weights sit on the
+# card doing nothing, which is the concern TTL eviction exists to address
+# at all. 600s puts the worst case at 1.6%, low enough that the reload is
+# no longer the thing worth optimising, without pinning VRAM for an
+# unreasonable stretch.
+#
+# Two notes the measurement makes clearer than intuition did. VRAM pressure
+# belongs to max_loaded_models, not to a shorter TTL: cutting this to free
+# memory re-pays the load cost on every lull, whereas the LRU cap evicts
+# only when memory is actually contended. And one global TTL over-holds
+# small models by roughly 17x relative to their load cost -- a per-model TTL
+# scaled by measured cost would be better, and is not built.
 DEFAULT_KEEP_ALIVE_S = 600.0
 
 # Settings removed in the multi-model migration. `extra="forbid"` catches
@@ -260,12 +283,22 @@ class Settings(BaseSettings):
     # opposite of what a cap is for. A request to a warm model should never
     # wait behind a cold load of a different one.
     #
-    # 2 is a starting point, not a measurement: it allows one load to
-    # overlap another's download/CPU phase while keeping at most two
-    # simultaneous claims on VRAM and PCIe bandwidth. Task 17's benchmark
-    # gives the real number -- how much a second simultaneous load degrades
-    # an in-flight one on this hardware -- and this should be revisited
-    # then, the same loop as default_keep_alive_s.
+    # 2, and the number now has a measurement behind it rather than an
+    # intuition (dev/output/model_load_results.json, concurrent_vs_sequential).
+    # Running two cold loads simultaneously instead of back to back:
+    #
+    #   same device   per-load 1.137x / 1.154x slower, makespan 1.727x better
+    #   across devices per-load 0.951x / 1.048x,        makespan 1.416x better
+    #
+    # So a second concurrent load costs each of them about 15% on one device
+    # and nothing measurable across two, while the pair finishes in a little
+    # over half the time. Concurrency clearly pays at 2, which rules out 1.
+    #
+    # It does not follow that more is better. Three or more simultaneous
+    # loads were not measured, and raising the cap on that basis would just
+    # restore the guess this replaced. Host RAM bounds it independently:
+    # two simultaneous 4B loads materialise ~15 GiB before either reaches a
+    # GPU, so this is a memory-safety limit as much as a contention one.
     max_concurrent_loads: int = Field(
         default=2,
         gt=0,

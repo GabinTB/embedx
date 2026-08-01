@@ -156,6 +156,52 @@ single static number describes this pair, which is the argument for
 knob you must tune — the queue reaches the right split whether the weights
 are calibrated or not.
 
+### Cold model loads
+
+From [`dev/04_model_load_latency.ipynb`](dev/04_model_load_latency.ipynb),
+raw values in
+[`dev/output/model_load_results.json`](dev/output/model_load_results.json).
+Medians, each run in a fresh process with the checkpoint's page cache
+verifiably evicted, on the same two-GPU host.
+
+A cold load is not dominated by the PCIe transfer people expect. For
+Qwen3-Embedding-4B (7.49 GiB) on the Blackwell card:
+
+| stage | time | share |
+|---|---|---|
+| disk → OS page cache | **6.382 s** | 68% |
+| host RAM → VRAM (PCIe) | 1.316 s | 14% |
+| first-inference kernel warmup | 1.193 s | 13% |
+| page cache → host RAM | 0.473 s | 5% |
+| **total** | **9.363 s** | |
+
+Reading the checkpoint off disk is the largest stage by a wide margin, and it
+is the one a warm page cache removes: reloading the same model while its
+files are still cached costs **2.981 s** instead. The PCIe copy is genuinely
+bus-bound (5.69 GiB/s against a measured 6.36 GiB/s ceiling), so that 14% is
+irreducible — but it is only 14%. Small models invert the picture: MiniLM
+loads in **0.548 s**, of which 46% is kernel autotune and 2% is PCIe.
+
+`EMBEDX_DEFAULT_KEEP_ALIVE_S` defaults to 600 s against these numbers: at
+60 s a lull would spend 15.6% of its time reloading, at 600 s it is 1.6%.
+
+### Scope limit: the balancing needs the model on every card
+
+embedx replicates a whole model per device and shards the *inputs*. That only
+works for a model small enough to fit on **every** device you give it.
+
+On this pair the smaller card is an RTX A400 with **3.68 GiB**, and
+Qwen3-Embedding-4B (7.49 GiB) does not fit it — the load OOMs on that device
+and the model is served from the Blackwell card alone. Nothing breaks:
+device-by-device placement keeps whichever devices succeed. But for such a
+model **the converging scheduler has nothing to balance, and the second card
+contributes nothing.**
+
+So the throughput results above apply to models under your smallest card's
+capacity. Above that, embedx is a single-GPU server with a model registry. If
+you are sizing this for a mismatched pair, that threshold — not the total
+VRAM across both cards — is the number that matters.
+
 ## Configuration
 
 All settings come from, in order of precedence: CLI flags > `EMBEDX_*`

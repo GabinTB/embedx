@@ -108,6 +108,63 @@ Both are visible in `GET /info` under `concurrency`, alongside live
 report unexplained 503s — `/info` itself never consumes a request slot, so
 it still answers when every slot is busy.
 
+## What a cold load costs
+
+Measured on the reference two-GPU host (RTX PRO 2000 Blackwell + RTX A400);
+raw values in `dev/output/model_load_results.json`, method in
+`dev/04_model_load_latency.ipynb`. Medians, each run in a fresh process with
+the checkpoint's page cache verifiably evicted.
+
+| stage | Qwen3-Embedding-4B (7.49 GiB) | MiniLM-L6-v2 (0.085 GiB) |
+|---|---|---|
+| 1 — disk → OS page cache | **6.382 s** | 0.097 s |
+| 2 — page cache → host RAM | 0.205 s | 0.143 s |
+| 2b — deferred mmap fault-in | 0.268 s | 0.044 s |
+| 3 — host RAM → VRAM (PCIe) | 1.316 s | 0.013 s |
+| 4 — first-inference kernel warmup | 1.193 s | **0.251 s** |
+| total, cold page cache | 9.363 s | 0.548 s |
+| total, warm page cache | 2.981 s | 0.451 s |
+
+**Disk dominates a large load: 68% of it.** The PCIe copy people assume is
+the bottleneck is 14%, and it is genuinely bus-bound (5.69 GiB/s against a
+measured 6.36 GiB/s ceiling), so there is nothing to reclaim there.
+
+**Practically, this means where you put the HF cache matters more than
+anything else you can change.** Stage 1 read at 1.174 GiB/s here. On a
+network filesystem, a spinning disk, or a container layer without a
+persistent volume, that stage — already the largest — gets worse, and every
+cold load pays it. Point `HF_HOME` at fast local storage and give it a
+persistent volume, so the cache survives restarts:
+
+```bash
+#EMBEDX_... (embedx has no setting for this; it is HF's own)
+HF_HOME=/var/lib/embedx/hf
+```
+
+A model reloaded while its files are still in the OS page cache skips stage 1
+entirely — 2.981 s instead of 9.363 s for the 4B model. That is why
+`EMBEDX_DEFAULT_KEEP_ALIVE_S` is 600 s rather than something aggressive: a
+short TTL re-pays this on every quiet period.
+
+Small models are dominated by stage 4, first-inference kernel autotune,
+which is roughly fixed per model rather than proportional to size. It is
+paid by whichever request arrives first after a load, so the first request
+to a freshly loaded model is always slower than the ones behind it.
+
+### A model that fits only the larger card runs single-GPU
+
+Qwen3-Embedding-4B **does not fit the RTX A400**: 7.49 GiB of bf16 weights
+against a 3.68 GiB card, which fails during the transfer with
+`CUDA out of memory. Tried to allocate 48.00 MiB`.
+
+This is handled, not fatal — embedx tries each device in turn and keeps
+whichever succeed, so the model is served from the Blackwell card alone. But
+be clear about what that means: **for such a model the multi-GPU balancing
+contributes nothing.** The converging scheduler needs the model resident on
+more than one device to have anything to balance. On this pair, a model
+larger than the A400's 3.68 GiB is effectively a single-GPU deployment, and
+the second card only helps for models small enough to be replicated on it.
+
 ## The safety floor
 
 Config-time validation used to guarantee that a running server had a

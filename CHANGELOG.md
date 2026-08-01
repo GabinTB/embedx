@@ -69,6 +69,25 @@ startup. A server is now configured without naming a checkpoint.
   never bind.
 - `GET /info` reports live `in_flight_requests` and `in_flight_loads` next
   to both caps and the queue timeout, and takes no request slot itself.
+- `EMBEDX_DEFAULT_KEEP_ALIVE_S` (600s) and `EMBEDX_MAX_CONCURRENT_LOADS` (2)
+  keep their values, but the values are now measured rather than reasoned
+  about. `dev/04_model_load_latency.ipynb` decomposes a cold load into disk,
+  host-RAM, PCIe and kernel-warmup stages: for a 7.49 GiB model the cold
+  load is 9.363s, of which the disk read is 68% and the PCIe copy only 14%,
+  dropping to 2.981s when the page cache is still warm. 600s puts the
+  worst-case reload overhead at 1.6% of an idle window against 15.6% at 60s.
+  Two concurrent cold loads cost each other ~15% on one device and nothing
+  measurable across two, while finishing 1.7x/1.4x sooner — which justifies
+  2 and rules out 1. Neither default changed; the placeholder justifications
+  in `config.py` did.
+
+### Known limitations
+
+- Multi-GPU balancing only applies to models that fit on *every* device: a
+  whole copy is placed per device and the inputs are sharded. On the
+  reference pair the smaller card is 3.68 GiB, and a 7.49 GiB model loads on
+  the larger card alone — correct behaviour, but the second card then
+  contributes nothing to it. Size against your smallest card, not the sum.
 
 ### Migration
 
