@@ -28,6 +28,7 @@ from embedx.registry import (
     ModelStatus,
     PoolingConflictError,
     PoolingRequiredError,
+    SmokeTestFailedError,
     UnsupportedWeightFormatError,
     WeightFormatUnverifiableError,
 )
@@ -616,6 +617,9 @@ def test_omitted_load_options_are_passed_as_unset() -> None:
         (ModelPlacementError("org/x", [(0, "OutOfMemoryError: no room")]), 503),
         (UnsupportedWeightFormatError("org/x", ["pytorch_model.bin"]), 400),
         (WeightFormatUnverifiableError("org/x", ConnectionError("hub down")), 503),
+        # Loaded onto the device but could not embed. Well-formed request,
+        # server cannot currently serve it, retry may succeed -> 503.
+        (SmokeTestFailedError("org/x", [0], "RuntimeError: no C compiler"), 503),
     ],
 )
 def test_registry_errors_map_to_status_in_the_standard_envelope(
@@ -640,6 +644,34 @@ def test_registry_errors_map_the_same_way_on_the_tei_endpoint() -> None:
     response = client.post("/embed", json={"inputs": "x", "model": "org/x"})
     assert response.status_code == 409
     _assert_envelope(response.json())
+
+
+def test_a_failed_smoke_test_reports_503_without_leaking_a_traceback() -> None:
+    """The operator gets the cause in the log; the client gets an envelope.
+
+    The chained exception is the whole point of SmokeTestFailedError -- it
+    carries a Triton compile failure or a missing compiler -- so it must not
+    ride along into the response body.
+    """
+    cause = RuntimeError("Failed to find C compiler; /usr/bin/gcc missing")
+    error = SmokeTestFailedError("org/x", [0, 1], f"RuntimeError: {cause}")
+    error.__cause__ = cause
+    client, _ = make_registry_client(FakeRegistry(raises=error))
+
+    response = client.post("/v1/embeddings", json={"input": "x", "model": "org/x"})
+
+    assert response.status_code == 503
+    body = response.json()
+    _assert_envelope(body)
+    assert body["error"]["type"] == "server_error"
+    assert "Traceback" not in str(body)
+    # The reason string IS in the message, matching how ModelPlacementError
+    # already surfaces its per-device failures. What must not appear is a
+    # stack dump. The chained exception stays on the server side for the log.
+    assert "org/x" in body["error"]["message"]
+    assert "NOT resident" in body["error"]["message"]
+    assert "no C compiler" not in body["error"]["message"]  # not this instance's reason
+    assert "Failed to find C compiler" in body["error"]["message"]
 
 
 def test_an_unmapped_registry_error_is_not_leaked_to_the_caller() -> None:

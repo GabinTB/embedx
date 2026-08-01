@@ -26,6 +26,7 @@ from embedx.registry import (
     PoolingConflictError,
     PoolingRequiredError,
     RegistryError,
+    SmokeTestFailedError,
     UnsupportedWeightFormatError,
     WeightFormatUnverifiableError,
     _default_weight_files,
@@ -147,11 +148,13 @@ def make_registry(
     factory: StubFactory | None = None,
     devices: int = 2,
     lister: Any = safetensors_listing,
+    settings: Settings | None = None,
 ) -> tuple[ModelRegistry, StubFactory]:
     factory = factory or StubFactory()
     registry = ModelRegistry(
         make_devices(devices),
         reaper_interval_s=0.01,
+        settings=settings,
         backend_factory=factory,
         weight_file_lister=lister,
     )
@@ -997,3 +1000,237 @@ def test_load_caps_are_reported_for_info() -> None:
     registry, _ = make_registry()
     assert registry.in_flight_loads == 0
     assert registry.max_concurrent_loads == Settings().max_concurrent_loads
+
+
+# --------------------------------------------------------------------------- #
+# Load-time smoke test (task 20)
+# --------------------------------------------------------------------------- #
+#
+# The failure being closed: a model that loads, registers as resident, and
+# then raises on every request. torch JIT-compiles Triton kernels at FIRST
+# inference, so a host missing a C toolchain produces exactly that -- /info
+# reports healthy, every embed fails.
+
+
+class SmokeStub:
+    """Backend double with a controllable `embed` and a call counter."""
+
+    def __init__(
+        self,
+        model_id: str,
+        device_index: int,
+        pooling: Pooling,
+        embed_impl: Any = None,
+    ) -> None:
+        self.model_id = model_id
+        self.device_index = device_index
+        self.pooling = pooling
+        self.closed = False
+        self.truncated_count = 0
+        self.embed_calls = 0
+        self._embed_impl = embed_impl
+
+    def embed(self, texts: list[str]) -> Any:
+        self.embed_calls += 1
+        if self._embed_impl is not None:
+            return self._embed_impl(texts)
+        return np.zeros((len(texts), 4), dtype=np.float32)
+
+    def length_fn(self, text: str) -> int:
+        return len(text)
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class SmokeFactory:
+    """Builds `SmokeStub`s. `embed_impl` applies to every backend built."""
+
+    def __init__(self, embed_impl: Any = None) -> None:
+        self.embed_impl = embed_impl
+        self.created: list[SmokeStub] = []
+
+    def __call__(
+        self, *, model_id: str, device_index: int, pooling: Pooling, **_: Any
+    ) -> SmokeStub:
+        backend = SmokeStub(model_id, device_index, pooling, embed_impl=self.embed_impl)
+        self.created.append(backend)
+        return backend
+
+
+def smoke_registry(factory: SmokeFactory, devices: int = 2, **overrides: Any) -> ModelRegistry:
+    return ModelRegistry(
+        make_devices(devices),
+        reaper_interval_s=0.01,
+        settings=Settings(**overrides),
+        backend_factory=factory,  # type: ignore[arg-type]
+        weight_file_lister=safetensors_listing,
+    )
+
+
+def broken_embed(_texts: list[str]) -> Any:
+    raise RuntimeError("Failed to find C compiler")
+
+
+def test_a_model_that_cannot_embed_does_not_become_resident() -> None:
+    """The core test. Placement succeeds, inference does not."""
+    factory = SmokeFactory(embed_impl=broken_embed)
+    registry = smoke_registry(factory)
+
+    with pytest.raises(SmokeTestFailedError) as excinfo:
+        registry.get_or_load("org/broken", pooling=Pooling.MEAN)
+
+    # Never visible: no phantom resident entry for a model that cannot serve.
+    assert registry.list_loaded() == []
+    # And the VRAM is not still held by a model nothing references.
+    assert factory.created, "no backend was ever constructed"
+    assert all(backend.closed for backend in factory.created)
+    assert excinfo.value.model_id == "org/broken"
+
+
+def test_the_underlying_cause_is_chained() -> None:
+    """The real reason must reach the server log, not just the envelope.
+
+    Two hops: the Engine wraps a worker failure with the device index
+    (`raise ... from failure`), and the registry wraps that. Both links are
+    asserted, because losing either one loses the diagnosis.
+    """
+    registry = smoke_registry(SmokeFactory(embed_impl=broken_embed))
+
+    with pytest.raises(SmokeTestFailedError) as excinfo:
+        registry.get_or_load("org/broken", pooling=Pooling.MEAN)
+
+    engine_error = excinfo.value.__cause__
+    assert isinstance(engine_error, RuntimeError)
+    root = engine_error.__cause__
+    assert isinstance(root, RuntimeError)
+    assert "Failed to find C compiler" in str(root)
+
+
+@pytest.mark.parametrize(
+    ("name", "impl"),
+    [
+        ("one-dimensional", lambda texts: np.zeros(4, dtype=np.float32)),
+        ("zero width", lambda texts: np.zeros((len(texts), 0), dtype=np.float32)),
+        ("wrong row count", lambda texts: np.zeros((len(texts) + 1, 4), dtype=np.float32)),
+    ],
+)
+def test_a_malformed_return_fails_the_load(name: str, impl: Any) -> None:
+    """A backend that returns garbage fails here, not on a real request.
+
+    Zero width is the one the Engine alone would let through: it validates
+    ndim and row count but not that the vectors have any width, so a (1, 0)
+    array would sail past and reach the caller as empty embeddings.
+    """
+    factory = SmokeFactory(embed_impl=impl)
+    registry = smoke_registry(factory)
+
+    with pytest.raises(SmokeTestFailedError):
+        registry.get_or_load("org/malformed", pooling=Pooling.MEAN)
+    assert registry.list_loaded() == []
+    assert all(backend.closed for backend in factory.created)
+
+
+def test_a_healthy_model_loads_and_the_smoke_test_leaves_no_trace() -> None:
+    factory = SmokeFactory()
+    registry = smoke_registry(factory)
+
+    engine = registry.get_or_load("org/good", pooling=Pooling.MEAN)
+    assert engine.embed(["hello"]).shape == (1, 4)
+
+    loaded = registry.list_loaded()
+    assert [status.model_id for status in loaded] == ["org/good"]
+    # The smoke input is short and must not register as truncated.
+    assert loaded[0].truncated_count == 0
+    assert all(backend.truncated_count == 0 for backend in factory.created)
+    assert not any(backend.closed for backend in factory.created)
+
+
+def test_smoke_test_runs_exactly_once_per_load() -> None:
+    """One item, so it costs one embed on one backend -- not one per device."""
+    factory = SmokeFactory()
+    registry = smoke_registry(factory)
+    registry.get_or_load("org/good", pooling=Pooling.MEAN)
+    assert sum(backend.embed_calls for backend in factory.created) == 1
+
+
+def test_disabling_the_smoke_test_skips_it_entirely() -> None:
+    """Not merely tolerant of failure -- it must not run at all."""
+    factory = SmokeFactory(embed_impl=broken_embed)
+    registry = smoke_registry(factory, smoke_test_on_load=False)
+
+    registry.get_or_load("org/broken", pooling=Pooling.MEAN)
+
+    assert [status.model_id for status in registry.list_loaded()] == ["org/broken"]
+    assert sum(backend.embed_calls for backend in factory.created) == 0
+
+
+def test_the_default_is_on() -> None:
+    """Silently-broken-resident is worse than a slow load."""
+    assert Settings().smoke_test_on_load is True
+
+
+# --------------------------------------------------------------------------- #
+# The non-obvious part: a raise in the load path must not wedge the locks
+# --------------------------------------------------------------------------- #
+
+
+def test_a_failed_smoke_test_releases_the_per_model_load_lock() -> None:
+    """A retry must be possible, not deadlocked.
+
+    Adding a raise between taking the per-model load lock and storing the
+    entry is exactly how a load path acquires a lock it never releases. The
+    second call here would block forever if that happened.
+    """
+    factory = SmokeFactory(embed_impl=broken_embed)
+    registry = smoke_registry(factory)
+
+    with pytest.raises(SmokeTestFailedError):
+        registry.get_or_load("org/flaky", pooling=Pooling.MEAN)
+
+    # Environment fixed; the same model id must now load.
+    factory.embed_impl = None
+    engine = registry.get_or_load("org/flaky", pooling=Pooling.MEAN)
+    assert engine.embed(["hello"]).shape == (1, 4)
+    assert [status.model_id for status in registry.list_loaded()] == ["org/flaky"]
+
+
+def test_a_failed_smoke_test_releases_the_cold_load_slot() -> None:
+    """The load semaphore too, not just the per-model lock.
+
+    With one slot, a leak would let the first failure through and hang the
+    second attempt forever. Three consecutive failures prove the release.
+    """
+    factory = SmokeFactory(embed_impl=broken_embed)
+    registry = smoke_registry(factory, max_concurrent_loads=1)
+
+    for attempt in range(3):
+        with pytest.raises(SmokeTestFailedError):
+            registry.get_or_load(f"org/broken-{attempt}", pooling=Pooling.MEAN)
+    assert registry.in_flight_loads == 0
+
+
+def test_concurrent_requests_for_a_failing_model_all_return() -> None:
+    """No thread is left holding a lock nobody releases."""
+    factory = SmokeFactory(embed_impl=broken_embed)
+    registry = smoke_registry(factory)
+    errors: list[BaseException] = []
+    barrier = threading.Barrier(4)
+
+    def attempt() -> None:
+        barrier.wait()
+        try:
+            registry.get_or_load("org/broken", pooling=Pooling.MEAN)
+        except BaseException as exc:
+            errors.append(exc)
+
+    threads = [threading.Thread(target=attempt) for _ in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+
+    assert not any(thread.is_alive() for thread in threads), "a thread deadlocked in the load path"
+    assert len(errors) == 4
+    assert all(isinstance(exc, SmokeTestFailedError) for exc in errors)
+    assert registry.list_loaded() == []

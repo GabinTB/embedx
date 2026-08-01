@@ -34,6 +34,7 @@ from embedx.registry import (
     PoolingConflictError,
     PoolingRequiredError,
     RegistryError,
+    SmokeTestFailedError,
     UnsupportedWeightFormatError,
     WeightFormatUnverifiableError,
 )
@@ -62,6 +63,12 @@ _REGISTRY_ERROR_STATUS: tuple[tuple[type[RegistryError], int], ...] = (
     (WeightFormatUnverifiableError, 503),
     # The server cannot serve this model right now; the request was fine.
     (ModelPlacementError, 503),
+    # Loaded onto the device but could not embed. Same shape as placement
+    # failure from the caller's side: the request was well-formed, the
+    # server cannot currently serve this model, and a retry after fixing
+    # the environment may succeed — so 503, not 4xx. The real cause is
+    # chained and logged; the client gets the envelope, not a traceback.
+    (SmokeTestFailedError, 503),
     # At the residency cap with every model busy. Administrative, not a
     # hardware limit, and it clears as soon as a request finishes.
     (ModelCapacityError, 503),

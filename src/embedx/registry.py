@@ -79,6 +79,7 @@ __all__ = [
     "PoolingConflictError",
     "PoolingRequiredError",
     "RegistryError",
+    "SmokeTestFailedError",
     "UnsupportedWeightFormatError",
     "WeightFormatUnverifiableError",
 ]
@@ -175,6 +176,34 @@ class ModelCapacityError(RegistryError):
             f"{len(resident)} resident model(s) ({', '.join(resident)}) are serving "
             "requests, so none can be evicted to make room. Retry shortly, or raise "
             "EMBEDX_MAX_LOADED_MODELS."
+        )
+
+
+class SmokeTestFailedError(RegistryError):
+    """The model loaded onto the device(s) but could not produce a vector.
+
+    The failure this exists for: placement succeeding while inference is
+    broken. torch JIT-compiles Triton kernels at first inference, not at
+    load, so on a host without a C toolchain a model loads clean, registers
+    as resident, and then raises on every request while `/info` reports it
+    healthy. Task 17 hit exactly that with Qwen3.
+
+    Its cause is always chained (`raise ... from exc`): the real reason —
+    a Triton compile failure, a missing compiler, a malformed backend
+    return — reaches the server log even though the client sees only the
+    envelope.
+    """
+
+    def __init__(self, model_id: str, devices: list[int], reason: str) -> None:
+        self.model_id = model_id
+        self.devices = list(devices)
+        self.reason = reason
+        super().__init__(
+            f"{model_id} loaded onto device(s) {devices} but failed its smoke test "
+            f"({reason}). The model is NOT resident: a model that cannot embed one "
+            "short string would have failed every request instead. This usually means "
+            "the runtime is missing something inference needs rather than something "
+            "loading needs — a C compiler for torch's Triton JIT is the common one."
         )
 
 
@@ -744,6 +773,10 @@ class ModelRegistry:
         if not backends:
             raise ModelPlacementError(model_id, failures)
 
+        engine = engine_from_backends(backends, placed, self._settings)
+        if self._settings.smoke_test_on_load:
+            self._smoke_test(model_id, engine, backends, placed)
+
         now = time.monotonic()
         # WARNING, not INFO: this is the moment a model's pooling is fixed
         # for as long as it stays resident, and a wrong one produces
@@ -758,7 +791,7 @@ class ModelRegistry:
             [device.index for device in placed],
         )
         return _Entry(
-            engine=engine_from_backends(backends, placed, self._settings),
+            engine=engine,
             backends=backends,
             devices=placed,
             pooling=pooling,
@@ -771,9 +804,100 @@ class ModelRegistry:
             length_cache=length_cache,
         )
 
+    # The string is fixed and deliberately trivial: this proves the pipeline
+    # runs at all, not that it is correct. Correctness against a reference
+    # implementation is what the GPU pooling tests are for.
+    _SMOKE_TEXT = "embedx smoke test"
+
+    def _smoke_test(
+        self,
+        model_id: str,
+        engine: Engine,
+        backends: list[EmbeddingBackend],
+        placed: list[DeviceInfo],
+    ) -> None:
+        """Embed one string before the model can become resident.
+
+        NOT OVERHEAD, AND NOT SAFE TO DELETE AS SUCH. This does not add a
+        cost, it moves one: torch JIT-compiles Triton kernels on first
+        inference, and task 17 measured that warmup at 2.29s for Qwen3-4B.
+        Somebody pays it either way. The only question is whether it is paid
+        by the load, where it is expected and attributable, or by whichever
+        user happens to send the first request.
+
+        What it buys is that a broken environment fails here — loudly, once,
+        with the model refused — instead of producing a resident model that
+        `/info` calls healthy and that raises on every request forever.
+
+        Runs BEFORE `_entries[model_id]` is set, so a failure leaves nothing
+        visible to `list_loaded()`. On failure the backends are released and
+        device memory returned before raising, or a refused model would go
+        on occupying VRAM with nothing holding a reference to free it.
+        """
+        # SPEC-GAP: one item exercises the Engine plus whichever worker wins
+        # the claim, not every device. The scheduler is work-stealing, so
+        # even N items would not guarantee one per backend; per-device
+        # coverage would mean bypassing the Engine and calling each backend
+        # directly, which would stop testing the wiring this is here to test.
+        # A fault specific to a second device therefore still surfaces on a
+        # real request.
+        try:
+            vectors = engine.embed([self._SMOKE_TEXT])
+            if vectors.ndim != 2 or vectors.shape[0] != 1:
+                raise ValueError(f"expected one 2-D row, got array of shape {vectors.shape}")
+            if vectors.shape[1] <= 0:
+                raise ValueError(f"backend returned zero-width vectors: shape {vectors.shape}")
+        except Exception as exc:
+            logger.exception(
+                "smoke test failed for %s on device(s) %s; releasing it and refusing the load",
+                model_id,
+                [device.index for device in placed],
+            )
+            self._release_backends(model_id, engine, backends, placed)
+            raise SmokeTestFailedError(
+                model_id,
+                [device.index for device in placed],
+                f"{type(exc).__name__}: {exc}",
+            ) from exc
+        logger.info(
+            "smoke test passed for %s on device(s) %s (dim=%d)",
+            model_id,
+            [device.index for device in placed],
+            vectors.shape[1],
+        )
+
     # ------------------------------------------------------------------ #
     # Eviction
     # ------------------------------------------------------------------ #
+
+    def _release_backends(
+        self,
+        model_id: str,
+        engine: Engine,
+        backends: list[EmbeddingBackend],
+        devices: list[DeviceInfo],
+    ) -> None:
+        """Drop a model's backends and hand its device memory back.
+
+        Shared by eviction and by a failed smoke test, so both follow the
+        same release ORDER — which is the part that is easy to get wrong.
+        Device memory returns only when the last Python reference to the
+        model's tensors is gone, and the Engine holds one per backend, so
+        both it and the caller's list must release before `empty_cache` is
+        asked for the blocks back. Doing it the other way round frees
+        nothing.
+        """
+        for backend in backends:
+            close = getattr(backend, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:
+                    logger.exception("closing backend for %s failed", model_id)
+        engine.close()
+        backends.clear()
+        for device in devices:
+            self._accelerator.empty_cache(device.index)
 
     def _reap_loop(self) -> None:
         # Event.wait, not sleep: stop() returns promptly instead of after a
@@ -812,22 +936,8 @@ class ModelRegistry:
 
     def _evict(self, model_id: str, entry: _Entry) -> None:
         resident_s = time.monotonic() - entry.loaded_at
-        for backend in entry.backends:
-            close = getattr(backend, "close", None)
-            if callable(close):
-                try:
-                    close()
-                except Exception:
-                    logger.exception("closing backend for %s failed", model_id)
-        # Order matters. CUDA memory returns only when the last reference to
-        # the model's tensors is gone, and the Engine holds one per backend,
-        # so both it and the entry release before empty_cache is asked for
-        # the blocks back. Doing it the other way round frees nothing.
-        entry.engine.close()
-        entry.backends.clear()
+        self._release_backends(model_id, entry.engine, entry.backends, entry.devices)
         entry.length_cache = None
-        for device in entry.devices:
-            self._accelerator.empty_cache(device.index)
         logger.info(
             "evicted %s from device(s) %s after %.1fs resident",
             model_id,

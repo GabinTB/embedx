@@ -244,6 +244,24 @@ class Settings(BaseSettings):
         "load evicts the least-recently-used model that no request is using, rather "
         "than refusing; if every resident model is in use, the load fails instead.",
     )
+    # Not a neutral toggle, and the default is not arbitrary. Loading a model
+    # proves it fits in VRAM; it does not prove it can produce a vector. torch
+    # JIT-compiles Triton kernels at FIRST INFERENCE, so a missing C toolchain
+    # yields a model that loads clean, reports healthy in /info, and fails
+    # every single request. Silently-broken-resident is the worst state in
+    # this system, and it is worth a slow load to make it unreachable.
+    #
+    # Turning this off buys nothing on a healthy host: the first-inference
+    # warmup is paid either way, just later and by a user instead. It exists
+    # for the case of a very large model where load-time latency is bounded
+    # by something external, and the operator has separately established the
+    # environment is sound.
+    smoke_test_on_load: bool = Field(
+        default=True,
+        description="Embed one short string before marking a model resident, so a model "
+        "that loads but cannot infer fails the load instead of every later request. "
+        "Costs the first-inference kernel warmup, which is paid either way.",
+    )
 
     # Concurrency. Two separate caps, deliberately: see the comment on
     # max_concurrent_loads for why sharing one would starve warm requests.

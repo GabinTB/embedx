@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
 import embedx.gpu.vendor as vendor
@@ -177,7 +178,14 @@ def test_placement_retries_on_the_vendors_own_oom_type() -> None:
         if device_index == 0:
             raise FakeVendorOOMError("no room on fake device 0")
         built.append(device_index)
-        return SimpleNamespace(embed=lambda texts: [], length_fn=len, close=lambda: None)
+        return SimpleNamespace(
+            # A real 2-D float32 block: the registry smoke-tests a model
+            # before it becomes resident, so a stub that cannot embed
+            # would fail the load rather than the placement under test.
+            embed=lambda texts: np.zeros((len(texts), 8), dtype=np.float32),
+            length_fn=len,
+            close=lambda: None,
+        )
 
     registry = _registry_with(accel, factory)
     with registry.acquire("some/model", pooling=Pooling.MEAN, dtype=Dtype.AUTO):
@@ -221,7 +229,14 @@ def test_eviction_releases_through_the_accelerator() -> None:
     accel = FakeAccelerator(memories=[16 * GIB])
 
     def factory(**kwargs: object) -> object:
-        return SimpleNamespace(embed=lambda texts: [], length_fn=len, close=lambda: None)
+        return SimpleNamespace(
+            # A real 2-D float32 block: the registry smoke-tests a model
+            # before it becomes resident, so a stub that cannot embed
+            # would fail the load rather than the placement under test.
+            embed=lambda texts: np.zeros((len(texts), 8), dtype=np.float32),
+            length_fn=len,
+            close=lambda: None,
+        )
 
     registry = _registry_with(accel, factory)
     # keep_alive=0 evicts the moment the last reference drops.

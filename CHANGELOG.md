@@ -81,6 +81,25 @@ startup. A server is now configured without naming a checkpoint.
   2 and rules out 1. Neither default changed; the placeholder justifications
   in `config.py` did.
 
+### Added — load-time smoke test
+
+- **A model is embedded once before it is allowed to become resident.** If
+  that fails, its backends are torn down, device memory is returned, and the
+  load fails with `SmokeTestFailedError` (503) with the real cause chained —
+  rather than leaving a model that `/info` reports as healthy and that
+  raises on every request. torch JIT-compiles Triton kernels at *first
+  inference*, not at load, so a host missing a C toolchain produced exactly
+  that shape of failure; it is the worst state in the system, because
+  nothing looks wrong.
+- The check also rejects a backend returning a malformed or zero-width
+  array, which the Engine alone would pass through to the caller as empty
+  embeddings.
+- `EMBEDX_SMOKE_TEST_ON_LOAD` (default on) turns it off. This is **not free
+  latency**: the first-inference kernel warmup is paid either way — task 17
+  measured it at 2.29s for Qwen3-4B — so this reorders the cost onto the
+  load, where it is expected and attributable, instead of onto whichever
+  user sends the first request.
+
 ### Added — Docker deployment
 
 - `Dockerfile`, `docker-compose.yml`, `.dockerignore` and `.env.example`: an

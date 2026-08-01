@@ -108,6 +108,13 @@ dedicated service account, `chown` both directories to match instead.
 `gcc` and `libc6-dev` are in the runtime stage on purpose. **Do not strip
 them as bloat.**
 
+Since the load-time smoke test landed, a host missing the toolchain fails
+the **load** with a 503 naming the model, instead of registering a resident
+model that raises on every request. That turns a silent, permanent fault
+into a loud one — but it does not remove the requirement, and on the
+systemd path (where you supply the toolchain yourself) it is still the
+thing to check first when loads start failing.
+
 torch routes RoPE-family models (Qwen3) through a Triton kernel that
 JIT-compiles a C helper at *first inference*, not at load. Without a
 compiler the model loads cleanly, registers as resident, and then every

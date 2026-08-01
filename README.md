@@ -240,6 +240,7 @@ drift:
 | `EMBEDX_DEVICE_BATCH_TOKENS` | dict[int, int] | {} | Per-device token-budget overrides, e.g. "0=16384,1=4096". |
 | `EMBEDX_DEFAULT_KEEP_ALIVE_S` | float | 600.0 | Seconds an idle model stays resident before it is unloaded. |
 | `EMBEDX_MAX_LOADED_MODELS` | int or None | None | Max models resident at once; unset means no cap. At the cap, a new load evicts the least-recently-used model that no request is using, rather than refusing; if every resident model is in use, the load fails instead. |
+| `EMBEDX_SMOKE_TEST_ON_LOAD` | bool | True | Embed one short string before marking a model resident, so a model that loads but cannot infer fails the load instead of every later request. Costs the first-inference kernel warmup, which is paid either way. |
 | `EMBEDX_MAX_CONCURRENT_REQUESTS` | int | 8 | Max embedding requests in flight at once; the rest queue. |
 | `EMBEDX_REQUEST_QUEUE_TIMEOUT_S` | float | 30.0 | Seconds a queued request waits for a slot before returning 503. |
 | `EMBEDX_MAX_CONCURRENT_LOADS` | int | 2 | Max cold model loads running at once; warm requests never queue here. |
