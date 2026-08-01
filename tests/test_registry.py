@@ -26,6 +26,8 @@ from embedx.registry import (
     PoolingRequiredError,
     RegistryError,
     UnsupportedWeightFormatError,
+    WeightFormatUnverifiableError,
+    _default_weight_files,
 )
 
 GIB = 2**30
@@ -353,15 +355,101 @@ def test_safetensors_alongside_a_legacy_file_loads_silently() -> None:
     assert factory.model_loads == ["org/both"]
 
 
-def test_an_unlistable_repo_loads_anyway() -> None:
-    # Fails open on purpose: a cached model behind an unreachable hub must
-    # still serve. The warning is the record.
+def test_an_unlistable_repo_is_refused_rather_than_loaded() -> None:
+    # Fails CLOSED. A check that silently does not run when the listing
+    # fails is not a check, and that is precisely when it matters.
     def unreachable(model_id: str, revision: str | None) -> list[str]:
-        raise ConnectionError("hub unreachable")
+        raise ConnectionError("hub unreachable: connection timed out")
 
     registry, factory = make_registry(lister=unreachable)
+    with pytest.raises(WeightFormatUnverifiableError) as excinfo:
+        registry.get_or_load("org/cached", pooling=Pooling.MEAN)
+
+    assert factory.loads == 0, "nothing may be constructed on an unverified checkpoint"
+    assert registry.list_loaded() == []
+    message = str(excinfo.value)
+    assert "org/cached" in message
+    assert "ConnectionError" in message and "connection timed out" in message
+    assert excinfo.value.__cause__ is excinfo.value.cause
+    assert isinstance(excinfo.value.cause, ConnectionError)
+
+
+def test_unverifiable_is_a_distinct_type_from_pickle_weights() -> None:
+    # Task 14 maps "ships pickle" (permanent, do not retry) and "could not
+    # check" (transient, do retry) to different status codes, which it can
+    # only do if neither type catches the other.
+    assert issubclass(WeightFormatUnverifiableError, RegistryError)
+    assert not issubclass(WeightFormatUnverifiableError, UnsupportedWeightFormatError)
+    assert not issubclass(UnsupportedWeightFormatError, WeightFormatUnverifiableError)
+
+
+def test_a_local_directory_is_listed_without_any_network_call(tmp_path: Any) -> None:
+    # The real lister, not a stub: a local path must never reach the hub,
+    # so failing closed cannot affect it. Any hub call here would raise.
+    checkpoint = tmp_path / "my-model"
+    (checkpoint / "nested").mkdir(parents=True)
+    (checkpoint / "config.json").write_text("{}")
+    (checkpoint / "model.safetensors").write_bytes(b"\x00")
+    (checkpoint / "nested" / "extra.json").write_text("{}")
+
+    files = _default_weight_files(str(checkpoint), None)
+    assert sorted(files) == ["config.json", "model.safetensors", "nested/extra.json"]
+
+    registry, factory = make_registry(lister=_default_weight_files)
+    registry.get_or_load(str(checkpoint), pooling=Pooling.MEAN)
+    assert factory.model_loads == [str(checkpoint)]
+
+
+def test_a_cached_model_falls_back_to_the_snapshot_when_the_hub_is_down(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    # list_repo_files is a pure API call and never consults the cache, so a
+    # fully downloaded model raises there on an offline host. Without this
+    # fallback, failing closed would refuse every cached model on an
+    # air-gapped box — including ones whose safetensors are on disk.
+    import huggingface_hub
+
+    snapshot = tmp_path / "snapshot"
+    snapshot.mkdir()
+    (snapshot / "config.json").write_text("{}")
+    (snapshot / "model.safetensors").write_bytes(b"\x00")
+
+    def offline(*args: Any, **kwargs: Any) -> Any:
+        raise OSError("offline mode is enabled")
+
+    monkeypatch.setattr(huggingface_hub, "list_repo_files", offline)
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", lambda *a, **k: str(snapshot))
+
+    assert sorted(_default_weight_files("org/cached", None)) == [
+        "config.json",
+        "model.safetensors",
+    ]
+
+    registry, factory = make_registry(lister=_default_weight_files)
     registry.get_or_load("org/cached", pooling=Pooling.MEAN)
     assert factory.model_loads == ["org/cached"]
+
+
+def test_nothing_cached_and_hub_down_surfaces_the_hub_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import huggingface_hub
+
+    def offline(*args: Any, **kwargs: Any) -> Any:
+        raise OSError("offline mode is enabled")
+
+    def not_cached(*args: Any, **kwargs: Any) -> Any:
+        raise FileNotFoundError("no local snapshot")
+
+    monkeypatch.setattr(huggingface_hub, "list_repo_files", offline)
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", not_cached)
+
+    registry, factory = make_registry(lister=_default_weight_files)
+    with pytest.raises(WeightFormatUnverifiableError) as excinfo:
+        registry.get_or_load("org/missing", pooling=Pooling.MEAN)
+    # The hub failure is the useful cause, not the cache miss that followed.
+    assert "offline mode is enabled" in str(excinfo.value)
+    assert factory.loads == 0
 
 
 # --------------------------------------------------------------------------- #

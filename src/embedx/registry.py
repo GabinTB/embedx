@@ -140,6 +140,29 @@ class UnsupportedWeightFormatError(RegistryError):
         )
 
 
+class WeightFormatUnverifiableError(RegistryError):
+    """The weight format could not be determined, so the load is refused.
+
+    Deliberately not a subclass of `UnsupportedWeightFormatError`: that one
+    is a permanent property of the checkpoint (it ships pickle weights and
+    always will, so retrying is pointless), this one is a transient state
+    of the server (the hub is unreachable and the model is not cached, so
+    retrying is exactly right). Task 14 can only map them to different
+    status codes if the types differ.
+    """
+
+    def __init__(self, model_id: str, cause: BaseException) -> None:
+        self.model_id = model_id
+        self.cause = cause
+        super().__init__(
+            f"cannot verify the weight format of {model_id}: listing its files "
+            f"failed ({type(cause).__name__}: {cause}). The load is refused rather "
+            "than attempted, because an unverified checkpoint may be pickle-based, "
+            "and pickle executes code on deserialization. Retry when the hub is "
+            "reachable, or point embedx at a local path."
+        )
+
+
 # --------------------------------------------------------------------------- #
 # Records
 # --------------------------------------------------------------------------- #
@@ -224,14 +247,53 @@ def _empty_cache(device_index: int) -> None:
         torch.cuda.empty_cache()
 
 
+def _cached_snapshot_files(model_id: str, revision: str | None) -> list[str] | None:
+    """What is already on disk for `model_id`, or None if nothing is.
+
+    `local_files_only=True` makes this a cache lookup, never a download.
+    """
+    from huggingface_hub import snapshot_download  # lazy: not needed for local paths
+
+    try:
+        root = Path(snapshot_download(model_id, revision=revision, local_files_only=True))
+    except Exception:
+        return None
+    return [str(path.relative_to(root)) for path in root.rglob("*") if path.is_file()]
+
+
 def _default_weight_files(model_id: str, revision: str | None) -> list[str]:
-    """Filenames `from_pretrained` could choose from, without downloading."""
+    """Filenames `from_pretrained` could choose from, without downloading.
+
+    Three sources, in order of authority: a local directory, the hub's file
+    listing, and finally whatever is already in the local hub cache.
+
+    That last fallback is not an optimisation. `list_repo_files` is a pure
+    API call — it never looks at the cache — so a model that is fully
+    downloaded and would load perfectly well offline still raises here on
+    an unreachable hub. Since the caller refuses any load it cannot verify,
+    without this fallback an air-gapped host could not serve a single
+    cached model, safetensors or not.
+    """
     local = Path(model_id)
     if local.is_dir():
         return [str(path.relative_to(local)) for path in local.rglob("*") if path.is_file()]
+
     from huggingface_hub import list_repo_files  # lazy: not needed for local paths
 
-    return list(list_repo_files(model_id, revision=revision))
+    try:
+        return list(list_repo_files(model_id, revision=revision))
+    except Exception as hub_exc:
+        cached = _cached_snapshot_files(model_id, revision)
+        if cached is None:
+            raise  # nothing on disk either: the caller decides what to do
+        logger.info(
+            "hub listing for %s failed (%s: %s); verifying the weight format "
+            "against the cached snapshot instead",
+            model_id,
+            type(hub_exc).__name__,
+            hub_exc,
+        )
+        return cached
 
 
 # --------------------------------------------------------------------------- #
@@ -490,19 +552,25 @@ class ModelRegistry:
         Safetensors alongside a legacy file is normal and fine: HF's own
         `from_pretrained` prefers safetensors, so that case passes silently.
         Only a checkpoint with no safetensors at all is refused.
+
+        Fails CLOSED. If the listing itself cannot be obtained, the check
+        has not run, and a check that silently does not run in the one
+        situation it was written for is not a check. The listing already
+        falls back to the local cache (see `_default_weight_files`), so
+        reaching this branch means embedx genuinely does not know what it
+        would be deserializing.
         """
         try:
             files = self._weight_file_lister(model_id, revision)
         except Exception as exc:
-            # A cached model behind an unreachable hub must still serve, so
-            # this fails open — loudly. Same call as _is_st_checkpoint's.
             logger.warning(
-                "could not list files for %s (%s: %s); loading without the weight-format check",
+                "refusing to load %s: could not list its files (%s: %s), so the "
+                "safetensors check cannot run",
                 model_id,
                 type(exc).__name__,
                 exc,
             )
-            return
+            raise WeightFormatUnverifiableError(model_id, exc) from exc
         if any(name.endswith(_SAFETENSORS_SUFFIX) for name in files):
             return
         legacy = sorted(name for name in files if name.endswith(_LEGACY_WEIGHT_SUFFIXES))
