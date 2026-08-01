@@ -14,6 +14,16 @@ Windows + NVIDIA via WSL2 works with friction. macOS is not supported at all**
 (Apple dropped NVIDIA drivers after 10.13; Docker Desktop on Mac has no GPU
 passthrough). Do not write "cross-platform" without that qualification.
 
+## Verify sm_120 first, before anything else
+
+Task 18 landed the `Accelerator` seam, but a code abstraction does not change
+which kernels a wheel was compiled with. Before building the compose file or
+anything downstream, confirm inside the built image that
+`torch.cuda.get_arch_list()` contains `sm_120`. A cu128 + cp314 wheel missing
+it produces exactly the "no kernel image is available for execution on the
+device" failure this project has already hit once on the host. Check it early
+in the build, not after everything else works.
+
 ## Version decisions, already researched — verify, do not re-derive
 
 - **sm_120 (Blackwell) requires CUDA 12.8 or newer.** 12.8 is therefore the
@@ -58,10 +68,12 @@ Multi-stage. `uv` for the install, matching project tooling. Install with the
 `gpu` extra. Non-root runtime user.
 
 **Base image and torch index must be build arguments** (`ARG CUDA_IMAGE`,
-`ARG TORCH_INDEX_URL`) with CUDA defaults, not hardcoded. ROCm and Intel XPU
-are plausible future targets (see task 18) and their runtimes cannot share an
-image, so adding one later should be a new build target rather than a
-Dockerfile rewrite. Do not add non-CUDA targets now.
+`ARG TORCH_INDEX_URL`) with CUDA defaults, not hardcoded. Task 18 abstracted
+the code side behind the `Accelerator` Protocol, so these two build args are
+now genuinely the whole story for adding a ROCm or Intel XPU build target
+later — their runtimes cannot share an image, and adding one should be a new
+build target rather than a Dockerfile rewrite. Do not add non-CUDA targets
+now.
 
 **Do not bake model weights into the image.** Task 17 measured disk read as
 the dominant cold-load stage (~61% for Qwen3-4B, 6.38 s of a ~10.4 s load).
