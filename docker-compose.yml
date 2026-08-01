@@ -1,0 +1,101 @@
+# embedx GPU deployment. See DEPLOY.md for the full walkthrough.
+#
+# Quick start:
+#   cp .env.example .env          # then edit, at minimum set EMBEDX_API_KEY
+#   mkdir -p cache/hf cache/triton
+#   docker compose up -d
+#
+# The cache directories must be owned by the uid the container runs as, or
+# Triton cannot write its kernel cache and every request fails. Creating them
+# yourself (as above) plus the EMBEDX_UID default below is what makes that
+# line up without any chown.
+
+services:
+  embedx:
+    build:
+      context: .
+      args:
+        # The two vendor-specific knobs. A ROCm or XPU target would override
+        # both; nothing else in the file is CUDA-specific.
+        CUDA_IMAGE: nvidia/cuda:12.8.1-base-ubuntu24.04
+        TORCH_INDEX_URL: https://download.pytorch.org/whl/cu128
+    image: embedx:0.1.0
+    container_name: embedx
+
+    # Runs as YOUR uid, not the image's baked-in 10001, so the bind-mounted
+    # caches below are writable without chowning them to a container-only
+    # user. Override in .env if you prefer a dedicated service account --
+    # then the cache dirs must be chowned to match.
+    user: "${EMBEDX_UID:-1000}:${EMBEDX_GID:-1000}"
+
+    # `required: false` so a fresh clone can `docker compose up` before
+    # anyone has copied .env.example — otherwise compose refuses to parse the
+    # file at all, which is a confusing first failure. Defaults below cover
+    # every value it would have supplied.
+    env_file:
+      - path: .env
+        required: false
+
+    # GPU passthrough. This is the Compose Specification form, supported by
+    # the docker-compose-plugin (v2 and later); the older `runtime: nvidia`
+    # is the Compose v1 spelling and is NOT used here. Either way the NVIDIA
+    # Container Toolkit must be installed on the host -- see DEPLOY.md.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              # `count: all` exposes every GPU. To serve on specific cards,
+              # replace with e.g. `device_ids: ["0"]` -- and read the
+              # CUDA_VISIBLE_DEVICES / EMBEDX_DEVICES section of DEPLOY.md
+              # first, because those three interact and it is easy to end up
+              # serving the wrong card.
+              count: all
+              capabilities: [gpu]
+
+    volumes:
+      # BIND MOUNTS TO HOST STORAGE, deliberately not named volumes.
+      #
+      # Task 17 measured the disk read as the dominant cold-load stage: 6.38s
+      # of a 9.36s Qwen3-4B load, 68% of it, at 1.17 GiB/s. That is the one
+      # place containerization can cost real measured time, and only if this
+      # is misconfigured. Put these on fast local storage (NVMe), not on a
+      # network filesystem, and not in the overlay filesystem.
+      - ${EMBEDX_HF_CACHE:-./cache/hf}:/cache/hf
+      # Triton JIT-compiles a C helper on first inference for RoPE models.
+      # Persisting this means it happens once, not on every container start.
+      - ${EMBEDX_TRITON_CACHE:-./cache/triton}:/cache/triton
+
+    ports:
+      # 127.0.0.1 ONLY. embedx binds 0.0.0.0 inside the container -- it has
+      # to, or the published port could not reach it -- so this line is what
+      # keeps the service off the network. Putting it on 0.0.0.0 exposes an
+      # endpoint that, without EMBEDX_API_KEY set, anyone can submit work to.
+      # Terminate TLS and authenticate in front of it before changing this.
+      - "127.0.0.1:${EMBEDX_PUBLISH_PORT:-8477}:8477"
+
+    restart: unless-stopped
+
+    healthcheck:
+      # /health touches no model state -- no load, no reference count, no
+      # request slot -- which is exactly what makes it valid here: an
+      # unhealthy mark means the process is wedged, not that a model is busy.
+      # Uses python because the image ships no curl.
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8477/health', timeout=5).status==200 else 1)"
+      interval: 30s
+      timeout: 10s
+      # Generous: a cold model load can hold the event loop's threadpool busy,
+      # and a 9-10s load on a contended box should not trip a restart loop.
+      start_period: 60s
+      retries: 3
+
+    # NOTE ON SHARING THE GPU: Ollama runs on this host and allocates VRAM on
+    # the same devices. A resident Ollama model directly shrinks what embedx
+    # can batch, and embedx sizes its token budgets from TOTAL device memory,
+    # not free memory -- so it will not notice and back off on its own. If you
+    # run both, either cap Ollama's residency (OLLAMA_MAX_LOADED_MODELS,
+    # OLLAMA_KEEP_ALIVE) or pin them to different cards with device_ids above.

@@ -1,12 +1,170 @@
 # Deploying embedx
 
-This walks through a single-host systemd deployment. The shipped unit file
-lives inside the package at `embedx/service/embedx.service`; print its path
-with:
+Two supported paths, both single-host. They are alternatives, not layers.
+
+| | Use it when |
+|---|---|
+| **[Docker](#docker)** | You want the Python / CUDA-wheel / Triton dependency problem solved for you. Recommended if you are not already running a matching Python and a C toolchain. |
+| **[systemd](#install)** | The host already has the right Python, a C compiler, and the driver, and you would rather not run a 12 GB image. Lower overhead, more assembly. |
+
+Neither is faster than the other in any way you will measure. GPU compute
+overhead under the NVIDIA Container Toolkit is roughly 1–2%. The one place
+containerization can genuinely cost you time is **disk I/O, and only if the
+model cache is misconfigured** — see [the cache volumes](#the-cache-volumes-are-the-part-that-matters).
+
+The systemd path below uses the unit file shipped inside the package at
+`embedx/service/embedx.service`; print its path with:
 
 ```bash
 python -c "from importlib import resources; print(resources.files('embedx') / 'service' / 'embedx.service')"
 ```
+
+---
+
+## Docker
+
+### Prerequisites
+
+1. An NVIDIA driver on the host. **525 or newer** — that is the floor implied
+   by the CUDA 12.8 base image, through CUDA minor-version compatibility.
+   Check with `nvidia-smi`.
+2. The **NVIDIA Container Toolkit**, which is what lets a container see the
+   GPU. Docker alone will not:
+
+   ```bash
+   curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey \
+     | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+   curl -fsSL https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list \
+     | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' \
+     | sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
+   sudo apt-get update && sudo apt-get install -y nvidia-container-toolkit
+   sudo nvidia-ctk runtime configure --runtime=docker
+   sudo systemctl restart docker
+   ```
+
+   Verify before going further — if this fails, nothing below will work:
+
+   ```bash
+   docker run --rm --gpus all nvidia/cuda:12.8.1-base-ubuntu24.04 nvidia-smi
+   ```
+
+**Linux + NVIDIA is the first-class target.** Windows + NVIDIA works through
+WSL2 with friction. **macOS is not supported at all** — Apple dropped NVIDIA
+driver support after 10.13 and Docker Desktop on macOS has no GPU
+passthrough. This is not "cross-platform".
+
+### Build and run
+
+```bash
+git clone https://github.com/<you>/embedx && cd embedx
+cp .env.example .env          # set EMBEDX_UID/GID to `id -u` / `id -g`
+mkdir -p cache/hf cache/triton
+docker compose up -d --build
+```
+
+Expect **12 GB and ~5 minutes**, almost all of it torch and the CUDA
+libraries. That size is normal for a torch + CUDA image and is why CI does
+not build it.
+
+```bash
+curl http://127.0.0.1:8477/health
+curl -X POST http://127.0.0.1:8477/v1/embeddings \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"sentence-transformers/all-MiniLM-L6-v2","pooling":"mean","input":["hello"]}'
+```
+
+No weights are baked into the image. The first request naming a model
+downloads it into the mounted cache; subsequent starts reuse it.
+
+### The cache volumes are the part that matters
+
+Both are **bind mounts to host storage**, deliberately not named volumes.
+
+`/cache/hf` (`HF_HOME`) holds model weights. Task 17 measured the disk read
+as the dominant stage of a cold load — **6.38 s of a 9.36 s** Qwen3-4B load,
+68% of it, at 1.17 GiB/s. Losing this cache on every container recreate
+re-pays the single largest cost there is. Put it on **fast local storage**;
+a network filesystem here is the one way containerization will cost you
+measurable throughput.
+
+`/cache/triton` holds JIT-compiled kernels (see below). Persisting it means
+the compile happens once rather than on every container start.
+
+**Both must be owned by the uid the container runs as.** This is the most
+common way to break the setup: Docker creates a missing bind-mount source as
+`root`, the unprivileged container user cannot write to it, and you get
+
+```
+PermissionError: [Errno 13] Permission denied: '/cache/triton/...'
+```
+
+at first inference — after the model has loaded and registered as resident.
+Creating the directories yourself and setting `EMBEDX_UID`/`EMBEDX_GID` to
+your own ids, as in the quick start, is what avoids it. If you prefer a
+dedicated service account, `chown` both directories to match instead.
+
+### Why the image ships a C compiler
+
+`gcc` and `libc6-dev` are in the runtime stage on purpose. **Do not strip
+them as bloat.**
+
+torch routes RoPE-family models (Qwen3) through a Triton kernel that
+JIT-compiles a C helper at *first inference*, not at load. Without a
+compiler the model loads cleanly, registers as resident, and then every
+request raises — which is precisely how this project's bare-metal host
+failed once. Python headers are *not* needed separately: the image's
+standalone CPython ships its own.
+
+To verify the toolchain in a running container:
+
+```bash
+docker compose exec embedx python -c "
+import torch, triton, triton.language as tl
+@triton.jit
+def k(x, y, o, n, B: tl.constexpr):
+    i = tl.program_id(0) * B + tl.arange(0, B); m = i < n
+    tl.store(o + i, tl.load(x + i, mask=m) + tl.load(y + i, mask=m), mask=m)
+x = torch.rand(1024, device='cuda'); y = torch.rand(1024, device='cuda'); o = torch.empty_like(x)
+k[(1,)](x, y, o, 1024, B=1024); torch.cuda.synchronize()
+assert torch.allclose(o, x + y); print('triton JIT OK')"
+```
+
+### Confirming Blackwell kernels
+
+The build **fails** if the torch wheel lacks `sm_120`, rather than letting
+you discover it as `no kernel image is available for execution on the
+device` at first inference. To check a running container:
+
+```bash
+docker compose exec embedx python -c "import torch; print(torch.cuda.get_arch_list())"
+# ['sm_75', 'sm_80', 'sm_86', 'sm_90', 'sm_100', 'sm_120']
+```
+
+### Changing CUDA or torch
+
+The two vendor-specific decisions are build arguments, not hardcoded:
+
+```bash
+docker compose build \
+  --build-arg CUDA_IMAGE=nvidia/cuda:12.8.1-base-ubuntu24.04 \
+  --build-arg TORCH_INDEX_URL=https://download.pytorch.org/whl/cu128
+```
+
+CUDA 12.8 is the **floor** for `sm_120` and deliberately the *oldest* CUDA
+that clears it. Raising the base to 13.x would push the minimum host driver
+from 525+ to 580+ and exclude most users for no benefit. Note that cu128
+currently tops out at torch 2.11 — 2.12 and later ship cu130 only.
+
+### Sharing a GPU with Ollama
+
+If Ollama runs on the same host it allocates VRAM on the same devices, and a
+resident Ollama model directly shrinks what embedx can batch. embedx sizes
+its token budgets from **total** device memory, not free memory, so it will
+not notice and back off. Either cap Ollama's residency
+(`OLLAMA_MAX_LOADED_MODELS`, `OLLAMA_KEEP_ALIVE`) or pin the two to
+different cards.
+
+---
 
 ## Install
 
@@ -221,6 +379,42 @@ If you expected "physical GPU 1", you are now serving from the wrong card,
 silently. Pick **one** mechanism: either restrict with
 `CUDA_VISIBLE_DEVICES` and leave `EMBEDX_DEVICES` unset, or expose
 everything and select with `EMBEDX_DEVICES` alone.
+
+### Under Docker it is a chain of three, not two
+
+Compose adds a third filter *upstream* of both, and they compose in order:
+
+```
+compose device_ids  ->  CUDA_VISIBLE_DEVICES  ->  EMBEDX_DEVICES
+   (what the             (what CUDA exposes        (which of those
+    container sees)       inside that)              embedx uses)
+```
+
+Each stage renumbers from zero for the stage after it. So with three
+physical GPUs:
+
+```yaml
+devices:
+  - driver: nvidia
+    device_ids: ["1", "2"]   # container sees physical 1,2 as 0,1
+    capabilities: [gpu]
+```
+
+```
+EMBEDX_DEVICES=1             # CUDA index 1 = PHYSICAL GPU 2
+```
+
+Same trap as above, one level deeper — and harder to see, because
+`nvidia-smi` on the host still shows all three. Run `nvidia-smi` *inside the
+container* to see what embedx actually has:
+
+```bash
+docker compose exec embedx nvidia-smi -L
+```
+
+The advice is unchanged, and stronger here: pick one mechanism. Selecting
+with compose's `device_ids` and leaving both environment variables unset is
+the clearest, because `docker compose config` then shows the whole story.
 
 ## Enable on boot
 

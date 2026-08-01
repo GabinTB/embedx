@@ -20,6 +20,19 @@ balances at runtime.
 
 ## Quickstart
 
+**Docker** (recommended — the Python / CUDA-wheel / Triton dependency problem
+is solved inside the image). Needs the [NVIDIA Container
+Toolkit](DEPLOY.md#prerequisites) and driver **525+**:
+
+```bash
+cp .env.example .env          # set EMBEDX_UID/GID to `id -u` / `id -g`
+mkdir -p cache/hf cache/triton
+docker compose up -d --build  # ~12 GB, ~5 min; almost all of it torch + CUDA
+```
+
+**Or on the host**, if it already has a matching Python, a C compiler and the
+driver:
+
 ```bash
 uv venv && uv pip install "embedx[gpu]"      # needs an NVIDIA driver; see DEPLOY.md
 
@@ -242,9 +255,32 @@ table without loading anything.
 
 ## Deployment
 
-Systemd unit (shipped as package data), env-file layout, Tailscale/UFW
-binding, API keys, running alongside Ollama, troubleshooting: see
-[DEPLOY.md](DEPLOY.md).
+Two supported paths, both single-host: **Docker** when you want the
+dependency stack solved for you, **systemd** when the host already has the
+right Python and toolchain and you would rather not run a 12 GB image.
+Dockerfile, compose file, systemd unit (shipped as package data), env-file
+layout, Tailscale/UFW binding, API keys, running alongside Ollama,
+troubleshooting: see [DEPLOY.md](DEPLOY.md).
+
+Compute overhead under the NVIDIA Container Toolkit is roughly 1–2% and not
+worth worrying about. Disk I/O is the part that can actually regress, and
+only if the model cache volume is misconfigured — the cold-load numbers
+above are why.
+
+### Platform support
+
+Stated plainly, because "cross-platform" would be a lie:
+
+| Platform | Status |
+|---|---|
+| **Linux + NVIDIA** | First class. What everything here is tested on. |
+| **Windows + NVIDIA** | Works via WSL2, with friction. |
+| **macOS** | **Not supported.** Apple dropped NVIDIA drivers after 10.13, and Docker Desktop on macOS has no GPU passthrough. |
+
+The container base is CUDA 12.8, which is the floor for `sm_120` (Blackwell)
+and implies a **minimum host driver of 525**. That is deliberately the
+oldest CUDA that supports Blackwell rather than the newest available: CUDA
+13.x would require driver 580+ and exclude most users for no gain.
 
 ## Limitations
 

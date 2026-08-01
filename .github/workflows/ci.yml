@@ -1,5 +1,18 @@
 name: CI
 
+# The Docker image is DELIBERATELY NOT BUILT here, and this omission is not
+# an oversight to be fixed. The CUDA base plus torch's bundled CUDA libraries
+# come to ~12 GB; building it on every push would dominate CI time and cache
+# storage for a check that a hosted runner cannot complete anyway -- it has
+# no GPU, so it could not run the image even after building it.
+#
+# What IS checked: tests/test_docker.py statically asserts the properties
+# that would silently rot (runtime C toolchain, cache paths, loopback
+# publish, the sm_120 build gate, the two vendor build args), and validates
+# the compose file with `docker compose config` when Docker happens to be
+# present. The claims those guard were verified against a real build on a
+# Blackwell + A400 host; DEPLOY.md documents how to re-verify them.
+
 on:
   push:
     branches: [main]

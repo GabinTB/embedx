@@ -1,0 +1,62 @@
+# The build needs pyproject.toml, README.md and src/ — nothing else.
+# Everything here either bloats the image, invalidates the cache on every
+# edit, or has no business inside a container.
+
+# Version control
+.git
+.gitignore
+.github
+
+# Development notebooks and their outputs. dev/output/ holds benchmark JSON
+# and dev/ pulls multi-GB datasets; neither belongs in a runtime image.
+dev/
+
+# Tests are not shipped. The gate runs on the host, not in the image.
+tests/
+.pytest_cache/
+.coverage
+htmlcov/
+*.ipynb
+.ipynb_checkpoints/
+
+# Local virtualenvs and caches — these are the big ones. A local .venv with
+# torch installed is several GB and would be copied into the build context.
+.venv/
+venv/
+.uv-cache/
+__pycache__/
+*.py[cod]
+.mypy_cache/
+.ruff_cache/
+
+# Docker's own files: including them means every compose edit busts the
+# build cache for no reason.
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# Local configuration and secrets. .env holds the API key.
+.env
+*.env
+!.env.example
+
+# Model weights, if anyone ever drops them here. Never baked into the image.
+*.safetensors
+*.bin
+*.pt
+*.pth
+*.gguf
+models/
+cache/
+
+# Editor and OS noise
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Docs that are not the packaged README
+DEPLOY.md
+CHANGELOG.md
+CLAUDE.md
+.claude/

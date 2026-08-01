@@ -81,6 +81,38 @@ startup. A server is now configured without naming a checkpoint.
   2 and rules out 1. Neither default changed; the placeholder justifications
   in `config.py` did.
 
+### Added — Docker deployment
+
+- `Dockerfile`, `docker-compose.yml`, `.dockerignore` and `.env.example`: an
+  additional deployment path, not a replacement. The systemd unit and its
+  docs are unchanged. Multi-stage, `uv`-installed, non-root, ~12 GB.
+- **The runtime stage ships `gcc` and `libc6-dev` on purpose.** torch routes
+  RoPE-family models through a Triton kernel that JIT-compiles a C helper at
+  *first inference*, not at load, so without a compiler the model loads
+  cleanly, registers as resident, and then every request raises. Python
+  headers are not needed separately — the image's standalone CPython ships
+  its own — but `gcc` without `libc6-dev` fails on a missing `stdlib.h`.
+- **The build fails if the torch wheel lacks `sm_120`**, rather than letting
+  it surface as `no kernel image is available for execution on the device`
+  at first inference. Base is CUDA 12.8: the floor for Blackwell and
+  deliberately the oldest CUDA that clears it, which keeps the **minimum
+  host driver at 525+** rather than the 580+ that CUDA 13.x would demand.
+- `CUDA_IMAGE` and `TORCH_INDEX_URL` are build arguments. With the task-18
+  `Accelerator` seam, those two are now the whole story for adding a ROCm or
+  XPU target — a new build target, not a Dockerfile rewrite. None is
+  provided today.
+- HF and Triton caches are **bind mounts to host storage**, not named
+  volumes: the measured disk read is 68% of a cold load, so overlay or
+  network storage there is the one place containerization costs real time.
+  Both must be owned by the container uid, which `EMBEDX_UID`/`EMBEDX_GID`
+  make configurable.
+- Published to `127.0.0.1` only; healthcheck on `/health`, which takes no
+  request slot and touches no model state.
+- Platform support is stated rather than implied: Linux + NVIDIA is first
+  class, Windows + NVIDIA works via WSL2 with friction, **macOS is not
+  supported at all**.
+- CI does not build the image, deliberately, and the CI config now says why.
+
 ### Internal
 
 - Every CUDA-specific call now goes through an `Accelerator` Protocol in

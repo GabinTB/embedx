@@ -216,3 +216,7 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Container cache bind mounts (docker-compose.yml). Model weights and
+# JIT-compiled kernels; never committed.
+cache/
