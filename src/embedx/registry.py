@@ -184,6 +184,12 @@ class ModelStatus:
     idle_s: float
     last_used_epoch_s: float
     ref_count: int
+    # Summed over every backend behind this model, so a model sharded
+    # across devices reports one total rather than a number per card.
+    # Truncation is silent everywhere else — an over-long input is cut and
+    # embedded with no error — so this counter is the only way an operator
+    # sees it happening.
+    truncated_count: int = 0
 
 
 @dataclass
@@ -413,6 +419,10 @@ class ModelRegistry:
                         idle_s=0.0 if entry.ref_count > 0 else max(0.0, now - entry.last_used),
                         last_used_epoch_s=entry.last_used_epoch,
                         ref_count=entry.ref_count,
+                        truncated_count=sum(
+                            int(getattr(backend, "truncated_count", 0))
+                            for backend in entry.backends
+                        ),
                     )
                     for model_id, entry in self._entries.items()
                 ),

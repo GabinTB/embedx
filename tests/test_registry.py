@@ -65,6 +65,7 @@ class StubBackend:
         self.device_index = device_index
         self.pooling = pooling
         self.closed = False
+        self.truncated_count = 0
         self._inner = FakeBackend(dim=4)
         self.dim = self._inner.dim
 
@@ -705,3 +706,22 @@ def test_status_reports_a_wall_clock_last_used_timestamp() -> None:
         pass
     refreshed = registry.list_loaded()[0]
     assert refreshed.last_used_epoch_s > status.last_used_epoch_s
+
+
+def test_status_sums_truncation_across_every_device_of_a_model() -> None:
+    registry, factory = make_registry()
+    registry.get_or_load("org/model", pooling=Pooling.MEAN)
+    assert registry.list_loaded()[0].truncated_count == 0
+
+    for backend, truncated in zip(factory.created, (11, 2), strict=True):
+        backend.truncated_count = truncated
+    # One total for the model, not one number per card.
+    assert registry.list_loaded()[0].truncated_count == 13
+
+
+def test_status_truncation_is_zero_for_a_backend_without_the_counter() -> None:
+    registry, factory = make_registry()
+    registry.get_or_load("org/model", pooling=Pooling.MEAN)
+    for backend in factory.created:
+        del backend.truncated_count
+    assert registry.list_loaded()[0].truncated_count == 0

@@ -92,6 +92,14 @@ class WrongShapeEngine(FakeEngine):
         return np.zeros(len(texts), dtype=np.float32)  # 1-D, not (n, dim)
 
 
+class TruncatingEngine(FakeEngine):
+    """Two devices behind one model, each having truncated some inputs."""
+
+    @property
+    def truncated_counts(self) -> list[int]:
+        return [7, 5]
+
+
 def make_settings(**overrides: object) -> Settings:
     kwargs: dict[str, object] = {"model_id": "test-model", "pooling": "mean"}
     kwargs.update(overrides)
@@ -354,6 +362,7 @@ def test_info_reports_server_config_and_the_legacy_fixed_model() -> None:
             "idle_s": 0.0,
             "last_used_epoch_s": body["models"][0]["last_used_epoch_s"],
             "ref_count": 0,
+            "truncated_count": 0,
         }
     ]
 
@@ -488,6 +497,7 @@ def make_status(model_id: str, **overrides: Any) -> ModelStatus:
         "idle_s": 1.5,
         "last_used_epoch_s": 1_700_000_000.0,
         "ref_count": 0,
+        "truncated_count": 0,
     }
     fields.update(overrides)
     return ModelStatus(**fields)
@@ -607,7 +617,7 @@ def test_omitted_load_options_are_passed_as_unset() -> None:
         (PoolingConflictError("org/x", Pooling.CLS, Pooling.MEAN), 409),
         (ModelPlacementError("org/x", [(0, "OutOfMemoryError: no room")]), 503),
         (UnsupportedWeightFormatError("org/x", ["pytorch_model.bin"]), 400),
-        (WeightFormatUnverifiableError("org/x", ConnectionError("hub down")), 400),
+        (WeightFormatUnverifiableError("org/x", ConnectionError("hub down")), 503),
     ],
 )
 def test_registry_errors_map_to_status_in_the_standard_envelope(
@@ -672,6 +682,7 @@ def test_info_renders_one_and_many_loaded_models() -> None:
             "idle_s": 1.5,
             "last_used_epoch_s": 1_700_000_000.0,
             "ref_count": 2,
+            "truncated_count": 0,
         }
     ]
 
@@ -756,3 +767,48 @@ def test_end_to_end_against_a_real_registry() -> None:
     missing_pooling = client.post("/v1/embeddings", json={"input": "x", "model": "org/other"})
     assert missing_pooling.status_code == 400
     assert factory.model_loads == ["org/real"], "the refused load must not have happened"
+
+
+def test_info_reports_truncation_summed_across_a_model_devices() -> None:
+    # Equivalent in spirit to the old per-device assertion, against the
+    # per-model shape: one model on two devices reports 7 + 5, not [7, 5].
+    # Truncation is silent everywhere else, so /info is where it surfaces.
+    client = make_client(TruncatingEngine())
+    body = client.get("/info").json()
+    assert body["models"][0]["truncated_count"] == 12
+
+
+def test_info_reports_truncation_from_a_real_registry() -> None:
+    from test_registry import StubFactory, make_devices, safetensors_listing
+
+    factory = StubFactory()
+    registry = ModelRegistry(
+        make_devices(2), backend_factory=factory, weight_file_lister=safetensors_listing
+    )
+    app = create_app(make_settings(), registry=registry)
+    client = TestClient(app, raise_server_exceptions=False)
+
+    client.post("/v1/embeddings", json={"input": "x", "model": "org/real", "pooling": "mean"})
+    assert client.get("/info").json()["models"][0]["truncated_count"] == 0
+
+    # Two backends, one per device, each having truncated some inputs.
+    for backend, truncated in zip(factory.created, (3, 4), strict=True):
+        backend.truncated_count = truncated
+    assert client.get("/info").json()["models"][0]["truncated_count"] == 7
+
+
+def test_unverifiable_weight_format_is_503_not_400() -> None:
+    # The distinction that justifies the separate exception type: pickle-only
+    # weights will never load (400), but an unreachable hub may well clear,
+    # and 4xx would tell the caller not to bother retrying.
+    client, _ = make_registry_client(
+        FakeRegistry(raises=WeightFormatUnverifiableError("org/x", ConnectionError("hub down")))
+    )
+    unverifiable = client.post("/v1/embeddings", json={"input": "x", "model": "org/x"})
+    assert unverifiable.status_code == 503
+
+    client, _ = make_registry_client(
+        FakeRegistry(raises=UnsupportedWeightFormatError("org/x", ["pytorch_model.bin"]))
+    )
+    pickled = client.post("/v1/embeddings", json={"input": "x", "model": "org/x"})
+    assert pickled.status_code == 400

@@ -52,12 +52,14 @@ _REGISTRY_ERROR_STATUS: tuple[tuple[type[RegistryError], int], ...] = (
     (PoolingRequiredError, 400),
     # Not a malformed request — a state conflict with a resident model.
     (PoolingConflictError, 409),
-    # The checkpoint is refused, permanently. Retrying will not help.
+    # The checkpoint ships pickle-only weights: refused permanently, and
+    # retrying cannot change that. A genuine 400.
     (UnsupportedWeightFormatError, 400),
-    # SPEC-GAP: task 14 assigns this 400 alongside the line above, though it
-    # is the transient one — the hub was unreachable and the model was not
-    # cached, so a retry may well succeed where 4xx implies it will not.
-    (WeightFormatUnverifiableError, 400),
+    # Not the same thing: the format could not be CHECKED, because the hub
+    # was unreachable and the model was not cached. That is a condition of
+    # the server, not a fault in the request, and it may well clear — so
+    # 503, which says "try again", rather than 4xx, which says "do not".
+    (WeightFormatUnverifiableError, 503),
     # The server cannot serve this model right now; the request was fine.
     (ModelPlacementError, 503),
 )
@@ -129,6 +131,7 @@ class _FixedModelSource:
                 idle_s=0.0,
                 last_used_epoch_s=self._loaded_at,
                 ref_count=0,
+                truncated_count=sum(self._engine.truncated_counts),
             )
         ]
 
@@ -377,6 +380,8 @@ def create_app(
                     "idle_s": status.idle_s,
                     "last_used_epoch_s": status.last_used_epoch_s,
                     "ref_count": status.ref_count,
+                    # Silent truncation must be visible somewhere in prod.
+                    "truncated_count": status.truncated_count,
                 }
                 for status in source.list_loaded()
             ],
