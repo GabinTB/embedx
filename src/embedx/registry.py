@@ -1,7 +1,9 @@
 """On-demand multi-model registry with TTL eviction.
 
 Importable without torch: every torch touch is lazy and inside a function,
-enforced by the task-06 ast guard which walks all of `src/embedx`.
+enforced by the task-06 ast guard which walks all of `src/embedx`. Device
+memory is released through the `Accelerator` seam, so nothing here names a
+GPU vendor.
 
 The registry owns model lifetime, not device discovery — it is handed the
 ranked device list and never calls `discover_devices` or `rank_devices`.
@@ -28,8 +30,8 @@ the spec names it; prefer `acquire()`.
 
 Why a thread and not an asyncio task
 ------------------------------------
-The reaper is a plain daemon `threading.Thread`. Eviction calls
-`torch.cuda.empty_cache()` and drops model tensors, both of which are
+The reaper is a plain daemon `threading.Thread`. Eviction calls the
+accelerator's `empty_cache` and drops model tensors, both of which are
 blocking C calls that would stall an event loop; and the registry is
 already thread-based because `Engine` dispatches backends across threads
 and the API layer reaches it through `run_in_threadpool`. An asyncio task
@@ -59,6 +61,7 @@ from embedx.backend.factory import (
 from embedx.config import DEFAULT_KEEP_ALIVE_S, Dtype, Pooling, Settings
 from embedx.engine.engine import Engine
 from embedx.gpu.discovery import DeviceInfo
+from embedx.gpu.vendor import Accelerator, get_accelerator
 
 logger = logging.getLogger("embedx.registry")
 
@@ -246,46 +249,27 @@ class _Entry:
 
 
 # --------------------------------------------------------------------------- #
-# Lazy torch helpers
+# Placement helpers
 # --------------------------------------------------------------------------- #
 
 
-def _import_torch() -> Any:
-    try:
-        import torch
-    except ImportError:
-        return None
-    return torch
-
-
-def _is_out_of_memory(exc: BaseException) -> bool:
-    """True for a CUDA OOM, and only that.
+def _is_out_of_memory(exc: BaseException, accelerator: Accelerator) -> bool:
+    """True for an out-of-memory failure, and only that.
 
     Any other construction failure (a bad model id, a missing config) would
     fail identically on every device, so it is re-raised rather than turned
     into a placement report that blames the hardware.
 
-    Matched by type name as well as by isinstance because torch is absent
-    entirely in CPU CI, which is also where the placement logic is tested.
+    Matched by type name as well as by isinstance because the GPU runtime is
+    absent entirely in CPU CI, which is also where the placement logic is
+    tested — so the exception classes cannot be imported to compare against.
+    The names come from the accelerator rather than being hardcoded here,
+    which keeps "OutOfMemoryError" a CUDA fact rather than a core one.
     """
-    torch = _import_torch()
-    if torch is not None and isinstance(exc, torch.cuda.OutOfMemoryError):
+    types = accelerator.oom_error_types()
+    if types and isinstance(exc, types):
         return True
-    return type(exc).__name__ == "OutOfMemoryError"
-
-
-def _empty_cache(device_index: int) -> None:
-    """Release cached blocks on one device; no-op without torch or CUDA.
-
-    Called after a failed placement so a partial allocation does not poison
-    the next device's attempt, and after eviction so the freed model's
-    memory is actually returned to the driver.
-    """
-    torch = _import_torch()
-    if torch is None or not torch.cuda.is_available():
-        return
-    with torch.cuda.device(device_index):
-        torch.cuda.empty_cache()
+    return type(exc).__name__ in accelerator.oom_error_names()
 
 
 def _cached_snapshot_files(model_id: str, revision: str | None) -> list[str] | None:
@@ -353,6 +337,7 @@ class ModelRegistry:
         settings: Settings | None = None,
         backend_factory: BackendFactory | None = None,
         weight_file_lister: Callable[[str, str | None], list[str]] | None = None,
+        accelerator: Accelerator | None = None,
     ) -> None:
         """`devices` is the ranked list from `rank_devices`, fastest first.
 
@@ -363,9 +348,10 @@ class ModelRegistry:
         constructible on its own, which is what the tests rely on; `serve`
         passes the real one.
 
-        `backend_factory` and `weight_file_lister` are the test seams: the
-        defaults are the real HFBackend constructor and a hub/local file
-        listing, so production callers pass neither.
+        `backend_factory`, `weight_file_lister` and `accelerator` are the
+        test seams: the defaults are the real HFBackend constructor, a
+        hub/local file listing and the process's real accelerator, so
+        production callers pass none of them.
         """
         self.devices = list(devices)
         self.reaper_interval_s = reaper_interval_s
@@ -374,6 +360,7 @@ class ModelRegistry:
         self.max_loaded_models = self._settings.max_loaded_models
         self._backend_factory: BackendFactory = backend_factory or hf_backend_factory
         self._weight_file_lister = weight_file_lister or _default_weight_files
+        self._accelerator = accelerator if accelerator is not None else get_accelerator()
 
         self._entries: dict[str, _Entry] = {}
         # Guards `_entries` and every ref_count/last_used mutation. Held
@@ -738,12 +725,12 @@ class ModelRegistry:
                     length_cache=length_cache,
                 )
             except Exception as exc:
-                if not _is_out_of_memory(exc):
+                if not _is_out_of_memory(exc, self._accelerator):
                     raise
                 failures.append((device.index, f"{type(exc).__name__}: {exc}"))
                 # Whatever was allocated before the OOM is still held; the
                 # next device starts clean only if it is released now.
-                _empty_cache(device.index)
+                self._accelerator.empty_cache(device.index)
                 logger.info(
                     "%s did not fit on device %d (%s); trying the next device",
                     model_id,
@@ -840,7 +827,7 @@ class ModelRegistry:
         entry.backends.clear()
         entry.length_cache = None
         for device in entry.devices:
-            _empty_cache(device.index)
+            self._accelerator.empty_cache(device.index)
         logger.info(
             "evicted %s from device(s) %s after %.1fs resident",
             model_id,

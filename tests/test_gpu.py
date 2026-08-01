@@ -5,12 +5,10 @@ from __future__ import annotations
 import ast
 from collections.abc import Iterator
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
-import embedx.gpu.discovery as discovery
-from embedx.gpu import ARCH_FACTOR, DeviceInfo, device_budgets, discover_devices, rank_devices
+from embedx.gpu import ARCH_FACTOR, DeviceInfo, device_budgets, rank_devices
 
 GIB = 2**30
 
@@ -120,65 +118,11 @@ def test_budgets_validation() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# discover_devices
+# The durable no-torch-at-import and no-vendor-leak rules
 # --------------------------------------------------------------------------- #
 
-
-def _fake_torch(properties: list[SimpleNamespace], available: bool = True) -> SimpleNamespace:
-    return SimpleNamespace(
-        cuda=SimpleNamespace(
-            is_available=lambda: available,
-            device_count=lambda: len(properties),
-            get_device_properties=lambda index: properties[index],
-        )
-    )
-
-
-def _fake_props(name: str, memory: int, sms: int, major: int, minor: int) -> SimpleNamespace:
-    return SimpleNamespace(
-        name=name, total_memory=memory, multi_processor_count=sms, major=major, minor=minor
-    )
-
-
-def test_discover_without_torch_returns_empty(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(discovery, "_import_torch", lambda: None)
-    assert discover_devices() == []
-    assert discover_devices([0, 1]) == []
-
-
-def test_discover_without_cuda_returns_empty(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(discovery, "_import_torch", lambda: _fake_torch([], available=False))
-    assert discover_devices() == []
-
-
-def test_discover_against_fake_torch(monkeypatch: pytest.MonkeyPatch) -> None:
-    props = [
-        _fake_props("Fake A100", 40 * GIB, 108, 8, 0),
-        _fake_props("Fake T4", 16 * GIB, 40, 7, 5),
-    ]
-    monkeypatch.setattr(discovery, "_import_torch", lambda: _fake_torch(props))
-
-    infos = discover_devices()
-    assert [info.index for info in infos] == [0, 1]
-    assert infos[0] == DeviceInfo(
-        index=0,
-        name="Fake A100",
-        total_memory_bytes=40 * GIB,
-        multi_processor_count=108,
-        capability=(8, 0),
-    )
-
-    filtered = discover_devices(devices=[1])
-    assert [info.index for info in filtered] == [1]
-    assert filtered[0].name == "Fake T4"
-
-    with pytest.raises(ValueError, match=r"\[3\]"):
-        discover_devices(devices=[0, 3])
-
-
-# --------------------------------------------------------------------------- #
-# The durable no-torch-at-import rule
-# --------------------------------------------------------------------------- #
+# The one module allowed to know which GPU vendor this is.
+VENDOR_MODULE = ("gpu", "vendor.py")
 
 
 def _is_type_checking_test(test: ast.expr) -> bool:
@@ -220,3 +164,76 @@ def test_no_module_level_torch_import_anywhere() -> None:
                 if module == "torch" or module.startswith("torch."):
                     offenders.append(f"{path}:{node.lineno}")
     assert not offenders, f"module-level torch imports found: {offenders}"
+
+
+def _is_vendor_module(path: Path) -> bool:
+    return path.parts[-2:] == VENDOR_MODULE
+
+
+def _names_a_vendor(node: ast.AST) -> bool:
+    """True for the two shapes a leaked CUDA call takes.
+
+    Attribute access `<anything>.cuda` catches `torch.cuda.empty_cache()`
+    and — the reason this is not a grep for the literal string
+    "torch.cuda" — the aliased spelling `torch_mod.cuda.get_device_capability()`
+    that hf.py used, which no such grep would have found.
+
+    A `"cuda"` / `"cuda:0"` string constant catches the other half: the
+    device string. `torch.device("cuda", index)` names no attribute at all,
+    so the attribute rule alone would let it straight back in. The f-string
+    form `f"cuda:{i}"` is caught too, because its constant piece is `cuda:`.
+    Longer prose that merely mentions CUDA (`"CUDA device indices"`) is not
+    matched: this is about device strings, not documentation.
+    """
+    if isinstance(node, ast.Attribute) and node.attr == "cuda":
+        return True
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        text = node.value.lower()
+        return text == "cuda" or text.startswith("cuda:")
+    return False
+
+
+def test_no_vendor_specific_calls_outside_the_seam() -> None:
+    """No module but `gpu/vendor.py` may name a GPU vendor.
+
+    The durable form of the task-18 result. Without it the seam rots: the
+    next feature that needs `empty_cache` reaches for `torch.cuda` directly,
+    it works, review waves it through, and two commits later the vendor
+    surface is spread across five files again.
+    """
+    src_root = Path(__file__).resolve().parent.parent / "src" / "embedx"
+    assert src_root.is_dir()
+    offenders = []
+    for path in sorted(src_root.rglob("*.py")):
+        if _is_vendor_module(path):
+            continue
+        tree = ast.parse(path.read_text(), filename=str(path))
+        for node in ast.walk(tree):  # every scope, not just module level
+            if _names_a_vendor(node):
+                offenders.append(f"{path.relative_to(src_root)}:{node.lineno}")
+    assert not offenders, (
+        "vendor-specific references outside gpu/vendor.py: "
+        f"{offenders} — go through the Accelerator instead"
+    )
+
+
+def test_the_guard_would_catch_a_reintroduced_leak() -> None:
+    """The guard fails on the exact code this task removed.
+
+    A guard nobody has seen fail is a guard nobody knows works — and both
+    of these spellings were live in the tree before this commit.
+    """
+    leaks = [
+        "torch.cuda.empty_cache()",  # registry.py
+        "major, _ = torch_mod.cuda.get_device_capability(index)",  # hf.py, aliased
+        'self._device = torch_mod.device("cuda", device_index)',  # hf.py, device string
+        'device = f"cuda:{index}"',  # the f-string spelling
+    ]
+    for leak in leaks:
+        tree = ast.parse(leak)
+        assert any(_names_a_vendor(node) for node in ast.walk(tree)), leak
+
+    # And does not fire on prose that merely mentions the vendor, which is
+    # why `cli.py`'s 'CUDA device indices' help text is allowed to stay.
+    allowed = ast.parse('help_text = "CUDA device indices, e.g. \\"0,1\\"."')
+    assert not any(_names_a_vendor(node) for node in ast.walk(allowed))

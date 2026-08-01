@@ -1,9 +1,14 @@
-"""Real Hugging Face CUDA backend — the `gpu` extra.
+"""Real Hugging Face GPU backend — the `gpu` extra.
 
 torch / transformers / sentence-transformers are imported lazily inside
 functions so `import embedx.backend.hf` works with torch absent; the
 task-06 ast guard enforces this. Torch types may appear in annotations
 only under TYPE_CHECKING.
+
+Vendor-specific facts — the device string and which dtypes the hardware
+supports — come from an `Accelerator` rather than being spelled `cuda`
+here. torch itself is still imported directly: the tensor library is not
+what the seam abstracts, the *device runtime* is.
 """
 
 from __future__ import annotations
@@ -15,6 +20,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 
 from embedx.config import Dtype, Pooling
+from embedx.gpu.vendor import Accelerator, DeviceInfo, get_accelerator
 
 if TYPE_CHECKING:  # annotation-only; never executes at runtime
     import torch
@@ -55,18 +61,19 @@ def _is_st_checkpoint(model_id: str, revision: str | None) -> bool:
         return False
 
 
-def _resolve_dtype(dtype: Dtype, capability_major: int, torch_mod: Any) -> Any:
+def _resolve_dtype(dtype: Dtype, info: DeviceInfo, accelerator: Accelerator, torch_mod: Any) -> Any:
     if dtype is Dtype.FLOAT32:
         return torch_mod.float32
     if dtype is Dtype.FLOAT16:
         return torch_mod.float16
     if dtype is Dtype.BFLOAT16:
         return torch_mod.bfloat16
-    # AUTO: bfloat16 needs Ampere (major >= 8); float16 is solid from
-    # Volta/Turing (major >= 7); anything older computes in float32.
-    if capability_major >= 8:
+    # AUTO: which reduced precisions the hardware actually supports is a
+    # vendor fact, not a universal one — `capability major >= 8` is true of
+    # CUDA and meaningless on ROCm — so the accelerator answers it.
+    if accelerator.supports_bfloat16(info):
         return torch_mod.bfloat16
-    if capability_major >= 7:
+    if accelerator.supports_float16(info):
         return torch_mod.float16
     return torch_mod.float32
 
@@ -131,9 +138,11 @@ class HFBackend:
         max_seq_length: int | None,
         revision: str | None = None,
         length_cache: TokenLengthCache | None = None,
+        accelerator: Accelerator | None = None,
     ) -> None:
         torch_mod = _import_torch()
         self._torch = torch_mod
+        self._accelerator = accelerator if accelerator is not None else get_accelerator()
         self.model_id = model_id
         self.device_index = device_index
         self.pooling = pooling
@@ -149,15 +158,15 @@ class HFBackend:
         self._st_model: Any = None
         self._model: Any = None
 
-        self._device = torch_mod.device("cuda", device_index)
-        major, _minor = torch_mod.cuda.get_device_capability(device_index)
-        self._dtype = _resolve_dtype(dtype, major, torch_mod)
+        info = self._accelerator.device_info(device_index)
+        self._device = torch_mod.device(self._accelerator.device_string(device_index))
+        self._dtype = _resolve_dtype(dtype, info, self._accelerator, torch_mod)
         logger.info(
             "device %d: dtype %s (configured %s, capability major %d)",
             device_index,
             self._dtype,
             dtype.value,
-            major,
+            info.capability[0],
         )
 
         if _is_st_checkpoint(model_id, revision):

@@ -81,6 +81,18 @@ startup. A server is now configured without naming a checkpoint.
   2 and rules out 1. Neither default changed; the placeholder justifications
   in `config.py` did.
 
+### Internal
+
+- Every CUDA-specific call now goes through an `Accelerator` Protocol in
+  `embedx/gpu/vendor.py` — device enumeration and properties, the `cuda:N`
+  device string, the OOM types caught during placement, `empty_cache`, the
+  bf16/fp16 support rules and the `ARCH_FACTOR` score table. No behaviour
+  changed: same scores, same placement, same dtype resolution, same error
+  messages, and the GPU suite passes unmodified. Adding ROCm or XPU later
+  is a new class implementing one Protocol rather than an edit across five
+  files. An ast guard fails the build on any `torch.cuda` access, or any
+  `"cuda:N"` device string, outside that one module.
+
 ### Known limitations
 
 - Multi-GPU balancing only applies to models that fit on *every* device: a

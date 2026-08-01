@@ -25,6 +25,7 @@ from embedx.api import create_app
 from embedx.config import Pooling, Settings
 from embedx.gpu.budgets import device_budgets
 from embedx.gpu.discovery import discover_devices, rank_devices
+from embedx.gpu.vendor import get_accelerator
 from embedx.registry import ModelRegistry, RegistryError
 
 logger = logging.getLogger("embedx.cli")
@@ -129,8 +130,9 @@ def _ranked_devices(settings: Settings) -> Any:
         typer.echo(f"check failed: {exc}", err=True)
         raise typer.Exit(code=1) from exc
     if not infos:
+        vendor = get_accelerator().name.upper()
         typer.echo(
-            "check failed: no CUDA device available (torch missing or CUDA unavailable)",
+            f"check failed: no {vendor} device available (torch missing or {vendor} unavailable)",
             err=True,
         )
         raise typer.Exit(code=1)
@@ -257,7 +259,8 @@ def info(
         typer.echo(f"devices: {exc}")
         raise typer.Exit(code=0) from exc
     if not infos:
-        typer.echo("devices: none visible (torch not installed or CUDA unavailable)")
+        vendor = get_accelerator().name.upper()
+        typer.echo(f"devices: none visible (torch not installed or {vendor} unavailable)")
         raise typer.Exit(code=0)
 
     ranked = rank_devices(infos, settings.device_weights)
