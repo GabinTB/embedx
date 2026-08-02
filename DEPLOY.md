@@ -12,12 +12,22 @@ overhead under the NVIDIA Container Toolkit is roughly 1–2%. The one place
 containerization can genuinely cost you time is **disk I/O, and only if the
 model cache is misconfigured** — see [the cache volumes](#the-cache-volumes-are-the-part-that-matters).
 
-The systemd path below uses the unit file shipped inside the package at
-`embedx/service/embedx.service`; print its path with:
+The systemd path below uses the unit file at
+[`src/embedx/service/embedx.service`](src/embedx/service/embedx.service) in
+this repository. It is a server-side file: the PyPI wheel is the library and
+deliberately does not carry it, because its `ExecStart` runs `embedx serve`,
+a command that install does not have. Fetch it from the repo rather than from
+your virtualenv:
 
 ```bash
-python -c "from importlib import resources; print(resources.files('embedx') / 'service' / 'embedx.service')"
+curl -fsSLO https://raw.githubusercontent.com/GabinTB/embedx/main/src/embedx/service/embedx.service
 ```
+
+A source install built with `EMBEDX_BUILD_SERVER=1` (the one the systemd path
+tells you to make, below) does ship it, so
+`python -c "from importlib import resources; print(resources.files('embedx') / 'service' / 'embedx.service')"`
+also works there. The `curl` is preferred because it does not depend on
+having got that flag right.
 
 ---
 
@@ -525,8 +535,10 @@ the clearest, because `docker compose config` then shows the whole story.
 ## Enable on boot
 
 ```bash
-sudo cp "$(python -c "from importlib import resources; print(resources.files('embedx') / 'service' / 'embedx.service')")" \
-    /etc/systemd/system/embedx.service
+# From the repository -- the unit is not in the PyPI wheel; see the note at
+# the top of this document.
+curl -fsSL https://raw.githubusercontent.com/GabinTB/embedx/main/src/embedx/service/embedx.service \
+    | sudo tee /etc/systemd/system/embedx.service > /dev/null
 # edit paths (venv location, DeviceAllow lines for your card count), then:
 sudo systemctl daemon-reload
 sudo systemctl enable --now embedx

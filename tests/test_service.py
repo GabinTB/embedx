@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import configparser
 import logging
-from importlib import resources
+import tomllib
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -17,6 +18,9 @@ from embedx.gpu.discovery import DeviceInfo
 
 runner = CliRunner()
 GIB = 2**30
+
+REPO = Path(__file__).resolve().parent.parent
+UNIT = REPO / "src" / "embedx" / "service" / "embedx.service"
 
 
 class FakeRegistry:
@@ -60,23 +64,68 @@ class FakeEngine:
 # --------------------------------------------------------------------------- #
 
 
-def _unit_resource() -> Any:
-    # Through the installed package, never a relative path: a missing
-    # package-data entry makes this test fail, which is the point.
-    return resources.files("embedx") / "service" / "embedx.service"
-
-
 def _parsed_unit() -> configparser.RawConfigParser:
     # strict=False: unit files legitimately repeat keys (DeviceAllow=...);
     # optionxform=str: systemd keys are case-sensitive.
     parser = configparser.RawConfigParser(strict=False)
     parser.optionxform = str  # type: ignore[assignment]
-    parser.read_string(_unit_resource().read_text())
+    parser.read_string(UNIT.read_text())
     return parser
 
 
-def test_unit_file_resolves_through_installed_package() -> None:
-    assert _unit_resource().is_file()
+def test_unit_file_exists_in_the_source_tree() -> None:
+    """Resolved from the repo, NOT `resources.files("embedx")`.
+
+    It used to come through the installed package, so that a missing
+    package-data entry failed this test. That stopped being a coherent check
+    once the unit became server-side: it is legitimately absent from a
+    library wheel, so resolving through the package means the content
+    assertions below either fail for a correct build or get skipped for one.
+
+    Skipping was the other option and is worse. A skip triggered by "the file
+    is not here" is indistinguishable from a skip triggered by "the
+    force-include silently broke on a server build", so the suite would go
+    green on exactly the regression it exists to catch. Reading from the
+    source tree instead means the content assertions ALWAYS run and can never
+    silently pass, and the packaging question is asked separately below --
+    statically here, and against the real artifacts in the CI packaging job,
+    which builds both ways.
+    """
+    assert UNIT.is_file(), f"{UNIT} is missing from the source tree"
+
+
+def test_unit_is_packaged_only_for_server_builds() -> None:
+    """The unit ships with the server half, under one flag, not on its own.
+
+    This is the packaging assertion the source-tree read gives up. It is
+    static -- the built artifacts are checked in CI -- but it catches the
+    realistic regression: someone restores the unconditional force-include,
+    or edits one of the two files and not the other.
+    """
+    pyproject = tomllib.loads((REPO / "pyproject.toml").read_text())
+    wheel = pyproject["tool"]["hatch"]["build"]["targets"]["wheel"]
+
+    assert "src/embedx/service" in wheel["exclude"], (
+        "the unit must be excluded from the default wheel: its ExecStart runs "
+        "`embedx serve`, which a library install does not have"
+    )
+    # An unconditional force-include would put it back in EVERY wheel and make
+    # the exclude above decorative. That is how it was before this change.
+    assert "force-include" not in wheel, (
+        "force-include is unconditional; the unit belongs in hatch_build.py's flagged path instead"
+    )
+    assert wheel["hooks"]["custom"]["path"] == "hatch_build.py"
+
+    # ...and the hook must actually re-include it, or a server build ships
+    # without the unit and nothing here would notice.
+    hook = (REPO / "hatch_build.py").read_text()
+    assert '"*.service"' in hook, "hatch_build.py does not re-include the unit file"
+    for excluded in wheel["exclude"]:
+        directory = excluded.rsplit("/", 1)[-1]
+        assert f'"{directory}"' in hook, (
+            f"pyproject excludes {excluded} but hatch_build.py never puts it "
+            "back: that directory would be missing from server builds too"
+        )
 
 
 def test_unit_file_parses_with_expected_sections() -> None:

@@ -74,11 +74,12 @@ jobs:
           uv venv /tmp/smoke --python ${{ matrix.python-version }}
           uv pip install --python /tmp/smoke/bin/python dist/*.whl
 
-      # The wheel ships the library and excludes `embedx.api` (task 21). An
-      # exclusion nobody checks is one that silently stops working, which is
-      # exactly how the smoke command below drifted for several commits, so
-      # the contents are asserted rather than assumed.
-      - name: The wheel must not contain the API layer
+      # The wheel ships the library and excludes the server half: `embedx.api`
+      # (task 21) and the systemd unit, whose ExecStart runs a command this
+      # wheel does not have. An exclusion nobody checks is one that silently
+      # stops working, which is exactly how the smoke command below drifted
+      # for several commits, so the contents are asserted rather than assumed.
+      - name: The wheel must not contain the server half
         run: |
           python - <<'PY'
           import glob, sys, zipfile
@@ -87,10 +88,12 @@ jobs:
           names = zipfile.ZipFile(wheel[0]).namelist()
           leaked = [n for n in names if n.startswith("embedx/api/")]
           assert not leaked, f"the HTTP layer leaked into the wheel: {leaked}"
+          units = [n for n in names if n.endswith(".service")]
+          assert not units, f"the systemd unit leaked into the library wheel: {units}"
           # The exclusion must not have taken the library with it.
           for required in ("embedx/registry.py", "embedx/engine/engine.py"):
               assert required in names, f"{required} missing from the wheel"
-          print(f"{wheel[0]}: no embedx/api/, library intact")
+          print(f"{wheel[0]}: no embedx/api/, no unit file, library intact")
           PY
 
       # `import embedx` alone would prove almost nothing -- __init__.py is

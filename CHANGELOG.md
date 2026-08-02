@@ -55,6 +55,14 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `fastapi`, `anyio` and `uvicorn[standard]` moved out of the core
   dependencies into the new `server` extra. A library install no longer
   pulls in a web framework it has no module to use.
+- **The systemd unit is server-side too, and no longer ships in the library
+  wheel.** `service/embedx.service` was force-included unconditionally, so a
+  library install carried a unit whose `ExecStart` runs `embedx serve` — a
+  command that install does not have. It now travels with `embedx.api` under
+  the same `EMBEDX_BUILD_SERVER=1` flag: present in Docker and
+  source-with-server builds, absent from PyPI. DEPLOY.md fetches it from the
+  repository rather than from the installed package, so the instruction does
+  not depend on having got that flag right.
 
 ## [0.2.0] - 2026-08-02
 
