@@ -61,6 +61,13 @@ class Engine:
         # at once without doubling its activation memory. Serialising per
         # backend makes concurrent requests interleave batch by batch per
         # device instead of oversubscribing VRAM.
+        #
+        # It is NOT the tokenizer's lock, and must not be reused as one.
+        # `self._length_fn` is `backends[0].length_fn` and runs on the
+        # calling thread — in `token_count` and in `Scheduler.__init__`
+        # below, both outside this lock — while another request's worker
+        # is inside `embed`. HFBackend guards that itself, with a lock
+        # that does not span the GPU forward pass this one does.
         self._backend_locks = [threading.Lock() for _ in self._backends]
         self._closed = False
 

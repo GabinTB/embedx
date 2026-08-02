@@ -6,12 +6,13 @@ fixtures and tests so collection works without the gpu extra installed.
 
 from __future__ import annotations
 
+import threading
 from typing import Any
 
 import numpy as np
 import pytest
 
-from embedx.config import Dtype, Pooling
+from embedx.config import Dtype, Pooling, Settings
 
 pytestmark = pytest.mark.gpu
 
@@ -116,6 +117,51 @@ def test_truncated_count(torch: Any) -> None:
     assert backend.truncated_count == 1
     backend.embed(["word " * 200, "again " * 300, "ok"])
     assert backend.truncated_count == 3
+
+
+def test_concurrent_requests_do_not_raise_already_borrowed(torch: Any) -> None:
+    """Regression test for `RuntimeError: Already borrowed` under load.
+
+    Found in production with 8 concurrent clients against this checkpoint.
+    HF fast tokenizers are Rust objects with interior mutability, and the
+    engine's per-backend lock does not cover them: `Scheduler.__init__`
+    calls `length_fn` on the requesting thread, outside that lock, while
+    another request's worker is inside `embed` on the same backend.
+
+    Driven through a real `Engine` rather than the backend alone, because
+    that interleaving is the bug — a backend hammered directly would not
+    reproduce the call site that escapes the lock.
+    """
+    from embedx.backend.factory import engine_from_backends
+    from embedx.gpu.discovery import discover_devices
+
+    devices = [device for device in discover_devices() if device.index == 0]
+    engine = engine_from_backends([make_backend(ST_MODEL, Pooling.MEAN)], devices, Settings())
+
+    clients = 8
+    errors: list[BaseException] = []
+    start = threading.Barrier(clients)
+
+    def client(c: int) -> None:
+        start.wait()
+        try:
+            for r in range(4):
+                # Varied, unique lengths: distinct texts defeat the shared
+                # length cache, so every request really does tokenize, and
+                # mixed lengths keep batches from lining up identically.
+                texts = [f"client {c} round {r} item {i} " + "word " * (i % 7) for i in range(16)]
+                out = engine.embed(texts)
+                assert out.shape == (len(texts), 384)
+        except BaseException as exc:  # recorded, then re-asserted at the join
+            errors.append(exc)
+
+    threads = [threading.Thread(target=client, args=(c,)) for c in range(clients)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert errors == []
 
 
 def test_length_fn_tokenizer_lengths_clamped_and_monotonic(torch: Any) -> None:

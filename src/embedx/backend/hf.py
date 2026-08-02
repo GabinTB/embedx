@@ -13,7 +13,9 @@ what the seam abstracts, the *device runtime* is.
 
 from __future__ import annotations
 
+import copy
 import logging
+import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -126,6 +128,20 @@ class HFBackend:
     One full model copy per device: the engine shards data across devices,
     not the model. Output is always float32 in input order, whatever the
     compute dtype.
+
+    THREAD SAFETY. A backend is used from several threads at once and the
+    tokenizer is the shared mutable state. HF fast tokenizers are Rust
+    objects with interior mutability: every call reconfigures truncation
+    and padding, so two concurrent calls on ONE instance fail the borrow
+    check with `RuntimeError: Already borrowed`. The engine's per-backend
+    lock does not cover this — it is taken around `embed` only, while the
+    scheduler calls `length_fn` on the *requesting* thread outside it, and
+    the factory wires every engine to `backends[0].length_fn`. So backend
+    0's tokenizer really can be borrowed twice at once, and was, under
+    eight concurrent clients.
+
+    The guard is two tokenizers with a lock each, installed by
+    `_install_tokenizer_guards`; see there for why not one of either.
     """
 
     def __init__(
@@ -155,6 +171,7 @@ class HFBackend:
         # the registry); a private instance keeps direct construction working.
         self._length_cache = length_cache if length_cache is not None else TokenLengthCache()
         self._tokenizer: Any = None
+        self._length_tokenizer: Any = None
         self._st_model: Any = None
         self._model: Any = None
 
@@ -173,6 +190,7 @@ class HFBackend:
             self._load_sentence_transformers(max_seq_length)
         else:
             self._load_auto_model(max_seq_length)
+        self._install_tokenizer_guards()
         logger.info(
             "device %d: %s loaded, dim=%d, pooling=%s, max_seq_length=%d",
             device_index,
@@ -247,6 +265,58 @@ class HFBackend:
                 )
         # Plain checkpoints declare no pooling; nothing to compare against.
 
+    def _install_tokenizer_guards(self) -> None:
+        """Give the length path its own tokenizer, and a lock to each.
+
+        TWO tokenizers, not one locked tokenizer. A single lock would be
+        correct, but on the sentence-transformers path it has to span the
+        whole of `encode()` — that call tokenizes inside itself and offers
+        no seam — so `length_fn` would then queue behind a GPU forward
+        pass. That is not a one-off cost: `Scheduler.__init__` calls
+        `length_fn` once per input, and each call would lose the lock race
+        to a worker thread already waiting to embed its next batch, so a
+        request batching N uncached texts could pay N forward passes
+        before it even starts. Splitting the instances takes the length
+        path off that lock entirely, for a few MB — tokenizers are
+        vocabulary and merge tables, not weights.
+
+        TWO locks, not one shared lock, for the same reason: separate
+        instances only help if they are not funnelled back through one
+        mutex. Each still needs its own, because concurrent requests
+        contend on the length tokenizer just as much.
+
+        `deepcopy` rather than a second `from_pretrained`: it needs no
+        disk or hub access, and it cannot disagree with the loaded model —
+        an ST checkpoint may keep its tokenizer in a module subfolder,
+        where `AutoTokenizer.from_pretrained(model_id)` finds something
+        else or nothing. Fast tokenizers implement `__getstate__` by
+        serialising the Rust object to a string, so the copy is genuinely
+        independent rather than an aliased handle.
+
+        Correctness never depends on the copy succeeding: if it fails,
+        both names point at the one tokenizer and both locks at the one
+        mutex, which is the single-lock design above — slower under load,
+        never wrong. That fallback is why `_count_truncations` must be
+        called outside the guarded region in `embed`: the locks may be the
+        same non-reentrant object.
+        """
+        self._tokenizer_lock = threading.Lock()
+        try:
+            self._length_tokenizer = copy.deepcopy(self._tokenizer)
+        except Exception as exc:
+            logger.warning(
+                "%s: could not copy the tokenizer for the length path (%s: %s); "
+                "falling back to one shared tokenizer under one lock — correct, "
+                "but batching will contend with inference on this backend",
+                self.model_id,
+                type(exc).__name__,
+                exc,
+            )
+            self._length_tokenizer = self._tokenizer
+        self._length_lock = (
+            self._tokenizer_lock if self._length_tokenizer is self._tokenizer else threading.Lock()
+        )
+
     # ------------------------------------------------------------------ #
     # Embedding
     # ------------------------------------------------------------------ #
@@ -254,15 +324,22 @@ class HFBackend:
     def embed(self, texts: list[str]) -> np.ndarray:
         if not texts:
             return np.empty((0, self.dim), dtype=np.float32)
+        # Reads through the LENGTH tokenizer and its lock, so it stays
+        # outside the guarded region below — the two locks are the same
+        # non-reentrant object whenever the tokenizer copy failed.
         self._count_truncations(texts)
         if self._st_model is not None:
-            vectors = self._st_model.encode(
-                texts,
-                batch_size=len(texts),  # the engine already sized this batch
-                convert_to_numpy=True,
-                normalize_embeddings=self.normalize,
-                show_progress_bar=False,
-            )
+            # Held across the forward pass, unavoidably: `encode` tokenizes
+            # internally and there is no seam to lock a narrower region. It
+            # is why the length path has a tokenizer of its own.
+            with self._tokenizer_lock:
+                vectors = self._st_model.encode(
+                    texts,
+                    batch_size=len(texts),  # the engine already sized this batch
+                    convert_to_numpy=True,
+                    normalize_embeddings=self.normalize,
+                    show_progress_bar=False,
+                )
             return np.asarray(vectors, dtype=np.float32)
         return self._embed_auto(texts)
 
@@ -284,13 +361,18 @@ class HFBackend:
 
     def _embed_auto(self, texts: list[str]) -> np.ndarray:
         torch_mod = self._torch
-        encoded = self._tokenizer(
-            texts,
-            padding=True,
-            truncation=True,
-            max_length=self.max_seq_length,
-            return_tensors="pt",
-        ).to(self._device)
+        # Only the tokenizer call. The host-to-device copy and the forward
+        # pass below are tensor work that borrows nothing, and holding the
+        # lock across them would stall other threads for no reason.
+        with self._tokenizer_lock:
+            encoded = self._tokenizer(
+                texts,
+                padding=True,
+                truncation=True,
+                max_length=self.max_seq_length,
+                return_tensors="pt",
+            )
+        encoded = encoded.to(self._device)
         with torch_mod.inference_mode():
             hidden = self._model(**encoded).last_hidden_state
             pooled = self._pool(hidden, encoded["attention_mask"])
@@ -331,7 +413,8 @@ class HFBackend:
         cached = self._length_cache.get(text)
         if cached is not None:
             return cached
-        length = len(self._tokenizer(text, truncation=False, padding=False)["input_ids"])
+        with self._length_lock:
+            length = len(self._length_tokenizer(text, truncation=False, padding=False)["input_ids"])
         self._length_cache.put(text, length)
         return length
 

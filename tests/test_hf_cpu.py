@@ -8,28 +8,43 @@ from __future__ import annotations
 
 import logging
 import sys
+import threading
+import time
 import types
 from typing import Any
 
+import numpy as np
 import pytest
 
 from embedx.backend.hf import HFBackend, TokenLengthCache, _is_st_checkpoint
 
 
 class CountingTokenizer:
-    def __init__(self) -> None:
-        self.calls = 0
+    def __init__(self, counter: list[int] | None = None) -> None:
+        self._counter = counter if counter is not None else [0]
+
+    @property
+    def calls(self) -> int:
+        return self._counter[0]
+
+    def __deepcopy__(self, memo: dict) -> CountingTokenizer:
+        # `_install_tokenizer_guards` copies the tokenizer for the length
+        # path, so a plain deepcopy would split the counter in two and hide
+        # exactly the re-tokenization these tests exist to catch. The clone
+        # is an independent object sharing ONE counter.
+        return CountingTokenizer(self._counter)
 
     def __call__(self, text: Any, truncation: bool = False, padding: bool = False) -> dict:
         assert isinstance(text, str), "batch re-tokenization would be a regression too"
-        self.calls += 1
+        self._counter[0] += 1
         return {"input_ids": [0] * len(text)}  # 1 token per character
 
 
 def make_stub_backend(
     max_seq_length: int = 8,
     cache: TokenLengthCache | None = None,
-    tokenizer: CountingTokenizer | None = None,
+    tokenizer: Any = None,
+    st_model: Any = None,
 ) -> HFBackend:
     backend = HFBackend.__new__(HFBackend)  # skip __init__: no torch here
     backend._tokenizer = tokenizer if tokenizer is not None else CountingTokenizer()
@@ -37,6 +52,13 @@ def make_stub_backend(
     backend.max_seq_length = max_seq_length
     backend.truncated_count = 0
     backend.device_index = 0
+    backend.model_id = "stub/model"
+    backend._st_model = st_model
+    backend.normalize = False
+    backend.dim = 8
+    # The real thing, not a hand-set pair of locks: the wiring is what is
+    # under test in the thread-safety cases below.
+    backend._install_tokenizer_guards()
     return backend
 
 
@@ -103,6 +125,138 @@ def test_backend_without_explicit_cache_still_works() -> None:
     assert backend.length_fn("hello") == 5
     assert backend.length_fn("hello") == 5  # second read from private cache
     assert backend._tokenizer.calls == 1  # type: ignore[attr-defined]
+
+
+# --------------------------------------------------------------------------- #
+# Tokenizer thread safety
+#
+# The FakeBackend the engine's concurrency tests use has no Rust tokenizer,
+# so `RuntimeError: Already borrowed` is structurally invisible to them. These
+# reproduce the borrow rule itself on CPU.
+# --------------------------------------------------------------------------- #
+
+
+class BorrowCheckedTokenizer:
+    """A stub with a fast tokenizer's borrow rule and nothing else.
+
+    HF fast tokenizers wrap a Rust object with interior mutability: a call
+    mutates truncation/padding state, so a second call that overlaps it on
+    the same instance fails the borrow check. `_flag_lock` guards only the
+    flag, never the call, so overlap is DETECTED rather than serialised —
+    the opposite of what the code under test must do.
+    """
+
+    def __init__(self) -> None:
+        self._borrowed = False
+        self._flag_lock = threading.Lock()
+
+    def __deepcopy__(self, memo: dict) -> BorrowCheckedTokenizer:
+        return BorrowCheckedTokenizer()  # an independent Rust object
+
+    def __call__(self, text: Any, **kwargs: Any) -> dict:
+        with self._flag_lock:
+            if self._borrowed:
+                raise RuntimeError("Already borrowed")
+            self._borrowed = True
+        try:
+            time.sleep(0.001)  # widen the window; without it the race is rare
+            payload = text if isinstance(text, str) else "".join(text)
+            return {"input_ids": [0] * len(payload)}
+        finally:
+            with self._flag_lock:
+                self._borrowed = False
+
+
+class UncopyableTokenizer(BorrowCheckedTokenizer):
+    """Refuses to be copied, like any tokenizer holding an unpicklable ref."""
+
+    def __deepcopy__(self, memo: dict) -> BorrowCheckedTokenizer:
+        raise TypeError("cannot pickle this tokenizer")
+
+
+class FakeSTModel:
+    """Stands in for SentenceTransformer: tokenizes inside `encode`.
+
+    That is the whole reason the ST path locks around the forward pass —
+    there is no seam between the tokenization and the compute.
+    """
+
+    def __init__(self, tokenizer: Any, dim: int = 8) -> None:
+        self._tokenizer = tokenizer
+        self._dim = dim
+
+    def encode(self, texts: list[str], **kwargs: Any) -> np.ndarray:
+        self._tokenizer(texts)
+        return np.zeros((len(texts), self._dim), dtype=np.float32)
+
+
+def _hammer(backend: HFBackend, workers: int = 8, rounds: int = 12) -> list[BaseException]:
+    """Concurrent `embed` and `length_fn`, the two contending call paths.
+
+    Texts are unique per call so the shared length cache never short-circuits
+    the tokenizer, which is what has to be exercised.
+    """
+    errors: list[BaseException] = []
+    start = threading.Barrier(2 * workers)
+
+    def embedder(w: int) -> None:
+        start.wait()
+        try:
+            for r in range(rounds):
+                backend.embed([f"embed {w} round {r}"])
+        except BaseException as exc:  # recorded, then re-asserted at the join
+            errors.append(exc)
+
+    def measurer(w: int) -> None:
+        start.wait()
+        try:
+            for r in range(rounds):
+                backend.length_fn(f"length {w} round {r}")
+        except BaseException as exc:  # recorded, then re-asserted at the join
+            errors.append(exc)
+
+    threads = [threading.Thread(target=embedder, args=(w,)) for w in range(workers)]
+    threads += [threading.Thread(target=measurer, args=(w,)) for w in range(workers)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    return errors
+
+
+def test_concurrent_embed_and_length_fn_never_borrow_one_tokenizer() -> None:
+    # Fails without the guards with `RuntimeError: Already borrowed`, which
+    # is the production symptom this reproduces.
+    tokenizer = BorrowCheckedTokenizer()
+    backend = make_stub_backend(max_seq_length=1000, tokenizer=tokenizer)
+    backend._st_model = FakeSTModel(backend._tokenizer)
+    assert _hammer(backend) == []
+
+
+def test_length_path_holds_a_tokenizer_of_its_own() -> None:
+    # The property that keeps batching off the lock that spans inference.
+    backend = make_stub_backend(tokenizer=BorrowCheckedTokenizer())
+    assert backend._length_tokenizer is not backend._tokenizer
+    assert backend._length_lock is not backend._tokenizer_lock
+
+
+def test_uncopyable_tokenizer_degrades_to_one_lock_but_stays_correct(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with caplog.at_level(logging.WARNING, logger="embedx.backend.hf"):
+        backend = make_stub_backend(max_seq_length=1000, tokenizer=UncopyableTokenizer())
+    assert "stub/model" in caplog.text
+    assert "cannot pickle this tokenizer" in caplog.text
+
+    # One tokenizer, so necessarily one lock — sharing the instance under two
+    # locks would guard nothing.
+    assert backend._length_tokenizer is backend._tokenizer
+    assert backend._length_lock is backend._tokenizer_lock
+
+    # And the fallback must not deadlock: `embed` calls `_count_truncations`,
+    # which takes that same non-reentrant lock.
+    backend._st_model = FakeSTModel(backend._tokenizer)
+    assert _hammer(backend, workers=4, rounds=6) == []
 
 
 def test_st_detection_fallback_warns(

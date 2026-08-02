@@ -100,6 +100,25 @@ startup. A server is now configured without naming a checkpoint.
   load, where it is expected and attributable, instead of onto whichever
   user sends the first request.
 
+### Fixed
+
+- **Concurrent requests no longer fail with `RuntimeError: Already
+  borrowed`.** HF fast tokenizers are Rust objects with interior
+  mutability — every call reconfigures truncation and padding — so two
+  overlapping calls on one instance fail its borrow check. The engine's
+  per-backend lock did not cover it: the scheduler calls `length_fn` on
+  the requesting thread, outside that lock, while another request's worker
+  is inside `embed`, and every engine is wired to `backends[0].length_fn`.
+  Reproduced with 8 concurrent clients against a sentence-transformers
+  checkpoint, where it surfaced as a 500.
+- The batching path now has a tokenizer of its own rather than sharing one
+  under a lock. On the sentence-transformers path the lock has to span the
+  whole of `encode()`, which tokenizes internally, so a single tokenizer
+  would make each request's batching queue behind another request's GPU
+  forward pass — once per uncached input. The copy costs a few MB; if it
+  fails, both paths fall back to one tokenizer under one lock, which is
+  slower under load and never wrong.
+
 ### Added — Docker deployment
 
 - `Dockerfile`, `docker-compose.yml`, `.dockerignore` and `.env.example`: an
