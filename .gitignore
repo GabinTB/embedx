@@ -220,3 +220,4 @@ __marimo__/
 # Container cache bind mounts (docker-compose.yml). Model weights and
 # JIT-compiled kernels; never committed.
 cache/
+docker-compose.override.yml
