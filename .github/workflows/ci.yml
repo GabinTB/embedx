@@ -74,8 +74,13 @@ jobs:
           uv venv /tmp/smoke --python ${{ matrix.python-version }}
           uv pip install --python /tmp/smoke/bin/python dist/*.whl
 
+      # `info` takes no model: since task 15 models are named per request and
+      # pooling is resolved per model at first load, so --model-id/--pooling
+      # no longer exist. Bare `info` still exercises the real work -- settings
+      # resolution, device discovery (none here, reported and exit 0) and the
+      # registry, which is empty in a fresh process.
       - name: Torch-free import and CLI smoke
         run: |
           /tmp/smoke/bin/python -c "import embedx; print(embedx.__version__)"
           /tmp/smoke/bin/embedx --help
-          /tmp/smoke/bin/embedx info --model-id smoke-test --pooling mean
+          /tmp/smoke/bin/embedx info

@@ -6,6 +6,16 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-02
+
+**This is a breaking release. Existing configuration will not start.**
+`Settings` no longer has `model_id`, `pooling`, `dtype` or `max_seq_len`,
+and the matching `EMBEDX_MODEL_ID`, `EMBEDX_POOLING`, `EMBEDX_DTYPE` and
+`EMBEDX_MAX_SEQ_LEN` variables are now startup errors rather than ignored
+values. A model is named per request instead, in the required `model`
+field, and its pooling is resolved once, on that model's first load. See
+[Migration](#migration) below.
+
 ### Changed — BREAKING
 
 embedx serves many models, loaded on demand, instead of one chosen at
@@ -80,50 +90,10 @@ startup. A server is now configured without naming a checkpoint.
   measurable across two, while finishing 1.7x/1.4x sooner — which justifies
   2 and rules out 1. Neither default changed; the placeholder justifications
   in `config.py` did.
-
-### Added — load-time smoke test
-
-- **A model is embedded once before it is allowed to become resident.** If
-  that fails, its backends are torn down, device memory is returned, and the
-  load fails with `SmokeTestFailedError` (503) with the real cause chained —
-  rather than leaving a model that `/info` reports as healthy and that
-  raises on every request. torch JIT-compiles Triton kernels at *first
-  inference*, not at load, so a host missing a C toolchain produced exactly
-  that shape of failure; it is the worst state in the system, because
-  nothing looks wrong.
-- The check also rejects a backend returning a malformed or zero-width
-  array, which the Engine alone would pass through to the caller as empty
-  embeddings.
-- `EMBEDX_SMOKE_TEST_ON_LOAD` (default on) turns it off. This is **not free
-  latency**: the first-inference kernel warmup is paid either way — task 17
-  measured it at 2.29s for Qwen3-4B — so this reorders the cost onto the
-  load, where it is expected and attributable, instead of onto whichever
-  user sends the first request.
-
-### Fixed
-
-- **Concurrent requests no longer fail with `RuntimeError: Already
-  borrowed`.** HF fast tokenizers are Rust objects with interior
-  mutability — every call reconfigures truncation and padding — so two
-  overlapping calls on one instance fail its borrow check. The engine's
-  per-backend lock did not cover it: the scheduler calls `length_fn` on
-  the requesting thread, outside that lock, while another request's worker
-  is inside `embed`, and every engine is wired to `backends[0].length_fn`.
-  Reproduced with 8 concurrent clients against a sentence-transformers
-  checkpoint, where it surfaced as a 500.
-- The batching path now has a tokenizer of its own rather than sharing one
-  under a lock. On the sentence-transformers path the lock has to span the
-  whole of `encode()`, which tokenizes internally, so a single tokenizer
-  would make each request's batching queue behind another request's GPU
-  forward pass — once per uncached input. The copy costs a few MB; if it
-  fails, both paths fall back to one tokenizer under one lock, which is
-  slower under load and never wrong.
-
-### Added — Docker deployment
-
-- `Dockerfile`, `docker-compose.yml`, `.dockerignore` and `.env.example`: an
-  additional deployment path, not a replacement. The systemd unit and its
-  docs are unchanged. Multi-stage, `uv`-installed, non-root, ~12 GB.
+- **Docker deployment.** `Dockerfile`, `docker-compose.yml`, `.dockerignore`
+  and `.env.example`: an additional deployment path, not a replacement. The
+  systemd unit and its docs are unchanged. Multi-stage, `uv`-installed,
+  non-root, ~12 GB.
 - **The runtime stage ships `gcc` and `libc6-dev` on purpose.** torch routes
   RoPE-family models through a Triton kernel that JIT-compiles a C helper at
   *first inference*, not at load, so without a compiler the model loads
@@ -151,7 +121,50 @@ startup. A server is now configured without naming a checkpoint.
   supported at all**.
 - CI does not build the image, deliberately, and the CI config now says why.
 
-### Internal
+### Fixed
+
+Both of the first two were found in production, not in the test suite.
+
+- **Concurrent requests no longer fail with `RuntimeError: Already
+  borrowed`.** HF fast tokenizers are Rust objects with interior
+  mutability — every call reconfigures truncation and padding — so two
+  overlapping calls on one instance fail its borrow check. The engine's
+  per-backend lock did not cover it: the scheduler calls `length_fn` on
+  the requesting thread, outside that lock, while another request's worker
+  is inside `embed`, and every engine is wired to `backends[0].length_fn`.
+  Reproduced with 8 concurrent clients against a sentence-transformers
+  checkpoint, where it surfaced as a 500.
+- The batching path now has a tokenizer of its own rather than sharing one
+  under a lock. On the sentence-transformers path the lock has to span the
+  whole of `encode()`, which tokenizes internally, so a single tokenizer
+  would make each request's batching queue behind another request's GPU
+  forward pass — once per uncached input. The copy costs a few MB; if it
+  fails, both paths fall back to one tokenizer under one lock, which is
+  slower under load and never wrong.
+- **A model is embedded once before it is allowed to become resident.** If
+  that fails, its backends are torn down, device memory is returned, and the
+  load fails with `SmokeTestFailedError` (503) with the real cause chained —
+  rather than leaving a model that `/info` reports as healthy and that
+  raises on every request. torch JIT-compiles Triton kernels at *first
+  inference*, not at load, so a host missing a C toolchain produced exactly
+  that shape of failure; it is the worst state in the system, because
+  nothing looks wrong.
+- The same check rejects a backend returning a malformed or zero-width
+  array, which the Engine alone would pass through to the caller as empty
+  embeddings.
+- `EMBEDX_SMOKE_TEST_ON_LOAD` (default on) turns it off. This is **not free
+  latency**: the first-inference kernel warmup is paid either way — task 17
+  measured it at 2.29s for Qwen3-4B — so this reorders the cost onto the
+  load, where it is expected and attributable, instead of onto whichever
+  user sends the first request.
+- The CI packaging job smoke-tested `embedx info --model-id ... --pooling
+  ...`, flags removed above, and so had failed on every commit since that
+  removal. It is the end-to-end proof that the core package installs and
+  imports without torch, so that guarantee went unverified for the span. Its
+  logs confirm the wheel built, installed and imported cleanly on every one
+  of those runs; only the CLI invocation was stale.
+
+### Changed
 
 - Every CUDA-specific call now goes through an `Accelerator` Protocol in
   `embedx/gpu/vendor.py` — device enumeration and properties, the `cuda:N`

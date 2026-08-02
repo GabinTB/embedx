@@ -1,6 +1,6 @@
 [project]
 name = "embedx"
-version = "0.1.0"
+version = "0.2.0"
 description = "Heterogeneous multi-GPU text embedding server with length-sorted token-budget batching and a converging work-stealing queue. OpenAI-compatible /v1/embeddings API."
 readme = "README.md"
 requires-python = ">=3.11"
