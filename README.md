@@ -142,48 +142,48 @@ id stopped resolving, and every number that run produced has been discarded
 rather than reused. MiniLM-L6-v2, mean pooling, `dtype=auto` (bfloat16 on
 both cards), `max_batch_tokens=16384`. Medians of 5 timed runs after 2
 discarded warmups, with correctness asserted *before* any timing: order
-preserved for all 256 probe rows, minimum self-cosine 0.999962, and a
+preserved for all 256 probe rows, minimum self-cosine 0.999974, and a
 maximum absolute difference from the single-GPU result of 1.95e-03 — which
 is bfloat16's own resolution, not scheduler drift (`correctness_check` in
 `results.json`).
 
 | configuration | makespan | throughput | dev0 idle | dev1 idle |
 |---|---|---|---|---|
-| fast GPU alone | 1.085 s | 407,815 tok/s | 0.001 s | no work |
-| static 50/50 by tokens | 1.614 s | 274,098 tok/s | 0.984 s | 0.000 s |
-| static weighted | 1.039 s | 425,939 tok/s | 0.001 s | 0.667 s |
-| **converging queue** | **0.949 s** | **466,118 tok/s** | 0.003 s | 0.007 s |
+| fast GPU alone | 1.067 s | 414,799 tok/s | 0.001 s | no work |
+| static 50/50 by tokens | 1.577 s | 280,604 tok/s | 0.958 s | 0.001 s |
+| static weighted | 1.012 s | 437,234 tok/s | 0.001 s | 0.650 s |
+| **converging queue** | **0.935 s** | **473,252 tok/s** | 0.004 s | 0.003 s |
 
-Against the fast GPU alone, the converging queue is **14.30% faster**
-(1.143x). Against a static split weighted by the same device weights embedx
-computes for itself, it is **9.43% faster** (1.094x). The IQRs do not
-overlap (1.035–1.041 s vs 0.948–0.974 s), so the second margin is
+Against the fast GPU alone, the converging queue is **14.09% faster**
+(1.141x). Against a static split weighted by the same device weights embedx
+computes for itself, it is **8.24% faster** (1.082x). The IQRs do not
+overlap (1.006–1.019 s vs 0.930–0.938 s), so the second margin is
 reproducible rather than noise — but it is single digits, and worth being
 plain about why.
 
 The static weight is a coarse architectural score: multiprocessor count
 times an architecture factor, computed without running anything. It rates
 the A400 at 8.1% of the pair, and on this workload that is simply too low —
-given a queue to pull from, the A400 absorbed **21.5%** of the tokens
-(95,242 of 442,423, 32% of the items). The weighted static split therefore
-starves it and then waits: it sits idle 0.667 s of a 1.039 s run, **64% of
+given a queue to pull from, the A400 absorbed **22.4%** of the tokens
+(99,106 of 442,423, 33% of the items). The weighted static split therefore
+starves it and then waits: it sits idle 0.650 s of a 1.012 s run, **64% of
 the run**, while the fast card finishes the backlog it should never have
 been given. The converging queue configures no ratio at all and finds the
-split empirically, ending with both devices idle for under 8 ms. Getting a
-static split *right* requires knowing that 21.5% number in advance, per
+split empirically, ending with both devices idle for under 4 ms. Getting a
+static split *right* requires knowing that 22.4% number in advance, per
 workload, per model; the queue's claim is that you should not have to.
 
 Guessing the split wrong is expensive in the other direction too: an even
-token split is **1.49x slower than not using the second GPU at all**
-(1.614 s vs 1.085 s), because the slow card is handed half the work and the
-fast one waits 0.98 s for it.
+token split is **1.48x slower than not using the second GPU at all**
+(1.577 s vs 1.067 s), because the slow card is handed half the work and the
+fast one waits 0.96 s for it.
 
 Measured host-to-device bandwidth is **6.36 GiB/s** on device 0 (PCIe 3.0
-x8) and **2.81 GiB/s** on device 1 (PCIe 3.0 x4) — 87% and 77% of their
+x8) and **2.83 GiB/s** on device 1 (PCIe 3.0 x4) — 87% and 77% of their
 respective link ceilings, with the PCIe link generation sampled across the
 timed region to confirm it had trained to the host maximum first (both links
 park at Gen1 when idle, so a cold measurement would understate them). Note
-what those numbers do to the weights: the cards differ by **2.26x** in
+what those numbers do to the weights: the cards differ by **2.25x** in
 transfer bandwidth while their configured weight ratio is **11.33x**. No
 single static number describes this pair, which is the argument for
 `EMBEDX_DEVICE_WEIGHTS` being an override you may never need rather than a

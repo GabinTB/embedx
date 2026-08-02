@@ -6,6 +6,28 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed — measurements
+
+- **`dev/03_real_gpu_throughput.ipynb` re-run, and repaired first.** It still
+  constructed `Settings(model_id=…, pooling=…, dtype=…, max_seq_len=…)`,
+  removed in 0.2.0, so it raised on its first cell and the headline benchmark
+  could not be reproduced by anyone. Model handling is passed to `HFBackend`
+  directly now, which is how it works post-migration.
+- `dev/output/results.json` therefore holds a new run on the same host and
+  corpus. The conclusions are unchanged and the margins moved slightly:
+  the converging queue is **14.09%** faster than the fast GPU alone
+  (was 14.30%) and **8.24%** faster than the weighted static split
+  (was 9.43%), with both devices idle under **4 ms** against 0.650 s for
+  that split. The A400 pulled **22.4%** of the tokens against the 8.1% its
+  static weight allots it. README figures are re-transcribed.
+- The figures quoted in the `[0.1.0]` entry below are left as they were:
+  they record what was measured at that release, and are not restated here
+  as current.
+- The notebook's environment record no longer hand-writes what nvidia-smi
+  showed. It was prose asserting a VRAM state from one particular day, which
+  survived every re-run unchanged — a retyped number by another name. It is
+  read from `nvidia-smi` at run time now.
+
 ### Changed — packaging
 
 - **The PyPI distribution is now `embedx-inference`.** The import name is
