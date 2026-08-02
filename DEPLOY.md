@@ -69,12 +69,18 @@ passthrough. This is not "cross-platform".
 git clone https://github.com/GabinTB/embedx && cd embedx
 cp .env.example .env          # set EMBEDX_UID/GID to `id -u` / `id -g`
 mkdir -p cache/hf cache/triton
-docker compose up -d --build
+docker compose up -d          # pulls ghcr.io/gabintb/embedx
 ```
 
-Expect **12 GB and ~5 minutes**, almost all of it torch and the CUDA
-libraries. That size is normal for a torch + CUDA image and is why CI does
-not build it.
+`docker compose up -d` pulls the published image. Add `--build` to build it
+locally instead, which is what you want if you are modifying source; both
+produce the same image tag, so the rest of this document applies either way.
+
+Expect **12 GB** either way, and **~5 minutes** if you are building. That size
+is normal for a torch + CUDA image and is why CI neither builds nor publishes
+it: a GitHub-hosted runner has roughly 21 GB free against a 20-25 GB build,
+and no GPU to verify the result with. Images are built and pushed from a GPU
+host with `make image-push`.
 
 ```bash
 curl http://127.0.0.1:8477/health

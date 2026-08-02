@@ -79,22 +79,13 @@ jobs:
       # wheel does not have. An exclusion nobody checks is one that silently
       # stops working, which is exactly how the smoke command below drifted
       # for several commits, so the contents are asserted rather than assumed.
+      #
+      # The check lives in a script, not inline here, because publish.yml runs
+      # the SAME one immediately before uploading to PyPI. Two copies of this
+      # rule would drift, and the copy on the publish path is the one that
+      # must not: a wheel cannot be un-published.
       - name: The wheel must not contain the server half
-        run: |
-          python - <<'PY'
-          import glob, sys, zipfile
-          wheel = glob.glob("dist/*.whl")
-          assert len(wheel) == 1, f"expected one wheel, got {wheel}"
-          names = zipfile.ZipFile(wheel[0]).namelist()
-          leaked = [n for n in names if n.startswith("embedx/api/")]
-          assert not leaked, f"the HTTP layer leaked into the wheel: {leaked}"
-          units = [n for n in names if n.endswith(".service")]
-          assert not units, f"the systemd unit leaked into the library wheel: {units}"
-          # The exclusion must not have taken the library with it.
-          for required in ("embedx/registry.py", "embedx/engine/engine.py"):
-              assert required in names, f"{required} missing from the wheel"
-          print(f"{wheel[0]}: no embedx/api/, no unit file, library intact")
-          PY
+        run: python scripts/check_library_wheel.py dist
 
       # `import embedx` alone would prove almost nothing -- __init__.py is
       # three lines and imports nothing. These are the modules that would pull

@@ -19,7 +19,11 @@ services:
         # both; nothing else in the file is CUDA-specific.
         CUDA_IMAGE: nvidia/cuda:12.8.1-base-ubuntu24.04
         TORCH_INDEX_URL: https://download.pytorch.org/whl/cu128
-    image: embedx:0.2.0
+    # The published image. `docker compose up -d` pulls it; `up -d --build`
+    # builds locally and tags the result with this same name, so both paths
+    # run through this one file. Bump on release, together with the version
+    # in pyproject.toml.
+    image: ghcr.io/gabintb/embedx:0.3.0
     container_name: embedx
 
     # Runs as YOUR uid, not the image's baked-in 10001, so the bind-mounted

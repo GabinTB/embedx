@@ -49,7 +49,16 @@ Toolkit](DEPLOY.md#prerequisites).
 git clone https://github.com/GabinTB/embedx && cd embedx
 cp .env.example .env          # set EMBEDX_UID/GID to `id -u` / `id -g`
 mkdir -p cache/hf cache/triton
-docker compose up -d --build  # ~12 GB, ~5 min; almost all of it torch + CUDA
+docker compose up -d          # pulls ghcr.io/gabintb/embedx, ~12 GB
+```
+
+The compose file supplies what a bare `docker run` would not: GPU passthrough,
+the two cache bind mounts, and a loopback-only published port. If you are
+modifying source, build the image instead of pulling it — same file, same
+resulting tag:
+
+```bash
+docker compose up -d --build  # ~5 min; almost all of it torch + CUDA
 ```
 
 No model is baked in and none is loaded at startup. The first request naming

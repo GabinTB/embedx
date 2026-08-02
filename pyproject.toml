@@ -12,7 +12,7 @@
 # source install, which is where the Python/torch/CUDA/toolchain combination
 # is pinned and tested together.
 name = "embedx-inference"
-version = "0.2.0"
+version = "0.3.0"
 description = "Heterogeneous multi-GPU text embedding server with length-sorted token-budget batching and a converging work-stealing queue. OpenAI-compatible /v1/embeddings API."
 readme = "README.md"
 requires-python = ">=3.11"

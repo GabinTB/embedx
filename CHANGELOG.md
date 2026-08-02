@@ -6,63 +6,116 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-### Changed — measurements
+## [0.3.0] - 2026-08-02
 
-- **`dev/03_real_gpu_throughput.ipynb` re-run, and repaired first.** It still
-  constructed `Settings(model_id=…, pooling=…, dtype=…, max_seq_len=…)`,
-  removed in 0.2.0, so it raised on its first cell and the headline benchmark
-  could not be reproduced by anyone. Model handling is passed to `HFBackend`
-  directly now, which is how it works post-migration.
+**A plain `pip install` no longer gives you the server.** The distribution is
+now `embedx-inference` and it ships the **library**: batching, the converging
+scheduler, `Engine`, device ranking and budgets, the model registry and
+config. It contains no `embedx.api`, no systemd unit, and no `serve`
+subcommand — `embedx --help` will not list `serve`, and says where it went.
+The HTTP server ships with the Docker image, or from a source install built
+with `EMBEDX_BUILD_SERVER=1`. This is breaking for anyone who installed from
+source and expected `serve`; see [Migration](#migration-from-02x) below.
+
+### Added
+
+- **First published release.** `embedx-inference` goes to PyPI via GitHub
+  Actions Trusted Publishing (OIDC), on `v*` tags, with no API token stored
+  anywhere. `.github/workflows/publish.yml` asserts the tag matches
+  `pyproject.toml`'s version and that the artifact really is the library
+  wheel before it uploads, because a wheel cannot be un-published.
+- A `workflow_dispatch` job in the same workflow publishes to **TestPyPI**,
+  so the first real upload is not the first time the pipeline runs.
+- `scripts/check_library_wheel.py`, the single wheel-contents assertion —
+  no `embedx/api/`, no `.service`, library intact — shared by the CI
+  packaging job and the publish workflow rather than duplicated in both.
+- `make image` / `make image-push`, the documented path for building and
+  pushing the GHCR image from a GPU host. See below for why this is not a
+  workflow.
+- A `server` extra naming the HTTP dependencies (`fastapi`, `anyio`,
+  `uvicorn[standard]`).
+
+### Changed
+
+- **The PyPI distribution is `embedx-inference`; the import name is still
+  `embedx`.** Only what you `pip install` changed. `embedx` on PyPI has
+  belonged to an unrelated 2016 project since before this one existed, and
+  PyPI normalises `embedX` to `embedx`, so the short name was never
+  available — the previous `name = "embedx"` could not have been published at
+  all. Distribution and import names differing is ordinary
+  (`scikit-learn`/`sklearn`, `beautifulsoup4`/`bs4`).
+- **`embedx serve` registers conditionally** on `embedx.api` being
+  importable, so on a library install the subcommand is absent rather than
+  present and broken, and there is no runtime failure path to handle.
+- **The systemd unit is server-side too** and no longer ships in the library
+  wheel. It was force-included unconditionally, so a library install carried
+  a unit whose `ExecStart` runs a command that install does not have. It now
+  travels with `embedx.api` under the same `EMBEDX_BUILD_SERVER=1` flag.
+  `DEPLOY.md` fetches it from the repository rather than from the installed
+  package, so the instruction does not depend on having got the flag right.
+- `fastapi`, `anyio` and `uvicorn[standard]` moved out of the core
+  dependencies into the `server` extra. A library install no longer pulls in
+  a web framework it has no module to use.
+- **README rewritten** for a reader who has never seen the project: the two
+  install paths and what each actually contains, the three scheduling
+  mechanisms, measured results, model support, an API reference, and an
+  unhedged limitations section.
+- The Docker quickstart now pulls a published image from GHCR by default,
+  with the local build kept as the path for anyone modifying source.
+- Repository documentation scrubbed before going public: a proprietary model
+  named as a benchmark candidate in a task file (the benchmark never used
+  it), a dead reference to a design document that never existed, and a task
+  index that stopped at task 12.
+
+### Fixed
+
+- **`dev/03_real_gpu_throughput.ipynb` could not be executed at all.** It
+  still constructed `Settings(model_id=…, pooling=…, dtype=…, max_seq_len=…)`,
+  removed in 0.2.0, so it raised on its first cell — meaning nobody could
+  reproduce the headline benchmark. Repaired and re-run on the two-GPU host.
 - `dev/output/results.json` therefore holds a new run on the same host and
-  corpus. The conclusions are unchanged and the margins moved slightly:
-  the converging queue is **14.09%** faster than the fast GPU alone
-  (was 14.30%) and **8.24%** faster than the weighted static split
-  (was 9.43%), with both devices idle under **4 ms** against 0.650 s for
-  that split. The A400 pulled **22.4%** of the tokens against the 8.1% its
-  static weight allots it. README figures are re-transcribed.
-- The figures quoted in the `[0.1.0]` entry below are left as they were:
-  they record what was measured at that release, and are not restated here
-  as current.
-- The notebook's environment record no longer hand-writes what nvidia-smi
+  corpus. The conclusions are unchanged and the margins moved slightly: the
+  converging queue is **14.09%** faster than the fast GPU alone (was 14.30%)
+  and **8.24%** faster than the weighted static split (was 9.43%), with both
+  devices idle under **4 ms** against 0.650 s for that split. The A400 pulled
+  **22.4%** of the tokens against the 8.1% its static weight allots it.
+  README figures are re-transcribed. Figures quoted in the `[0.1.0]` entry
+  below are left as they were: they record what was measured at that release.
+- The notebook's environment record no longer hand-writes what `nvidia-smi`
   showed. It was prose asserting a VRAM state from one particular day, which
   survived every re-run unchanged — a retyped number by another name. It is
   read from `nvidia-smi` at run time now.
+- A `.service` rounding figure in that notebook's own results table
+  (`0.001 s` for a value that rounds to `0.000 s`) corrected.
 
-### Changed — packaging
+### Known limitations
 
-- **The PyPI distribution is now `embedx-inference`.** The import name is
-  still `embedx` and the repository is still `embedx`; only the name you
-  `pip install` changed. `embedx` on PyPI has belonged to an unrelated 2016
-  project since before this one existed, and PyPI normalises `embedX` to
-  `embedx`, so the short name was never available — the previous
-  `name = "embedx"` could not have been published at all. Distribution and
-  import names differing is ordinary (`scikit-learn`/`sklearn`,
-  `beautifulsoup4`/`bs4`).
-- **That distribution ships the library, not the server.** Batching, the
-  converging scheduler, `Engine`, device ranking and budgets, the model
-  registry and config — for a batch job that wants multi-GPU scheduling
-  without an HTTP round-trip in the middle. `embedx.api` is excluded from
-  the wheel, and `embedx serve` is registered only when that package is
-  importable, so on a library install the subcommand is absent from
-  `--help` rather than present and broken.
-- **The HTTP server ships via Docker or a source install**, which is where
-  the Python, torch, CUDA and C-toolchain versions are pinned and tested
-  together. A source install needs both `[server]`, for the HTTP
-  dependencies, and `EMBEDX_BUILD_SERVER=1`, which includes the modules at
-  build time; `pip install .` builds the same excluded wheel, so the flag is
-  what distinguishes a server build from a library one. The Dockerfile sets
-  it and then fails the build if `embedx.api` did not land.
-- `fastapi`, `anyio` and `uvicorn[standard]` moved out of the core
-  dependencies into the new `server` extra. A library install no longer
-  pulls in a web framework it has no module to use.
-- **The systemd unit is server-side too, and no longer ships in the library
-  wheel.** `service/embedx.service` was force-included unconditionally, so a
-  library install carried a unit whose `ExecStart` runs `embedx serve` — a
-  command that install does not have. It now travels with `embedx.api` under
-  the same `EMBEDX_BUILD_SERVER=1` flag: present in Docker and
-  source-with-server builds, absent from PyPI. DEPLOY.md fetches it from the
-  repository rather than from the installed package, so the instruction does
-  not depend on having got that flag right.
+- The GHCR image is **pushed manually from a GPU host**, not built in CI.
+  A GitHub-hosted runner starts with roughly 21 GB free and this image needs
+  around 20-25 GB to build (the 7.36 GB `/opt/venv` layer is materialised in
+  both the builder and the runtime stage), so it would need a disk-cleanup
+  step to fit at all — and the runner has no GPU, so it could not verify the
+  result it published. `make image-push` is documented instead.
+
+### Migration from 0.2.x
+
+If you installed with `pip install embedx` and ran `embedx serve`:
+
+```bash
+# Server, from source:
+EMBEDX_BUILD_SERVER=1 pip install \
+  "embedx-inference[gpu,server] @ git+https://github.com/GabinTB/embedx"
+
+# Server, from the image (no Python involved):
+docker pull ghcr.io/gabintb/embedx:0.3.0
+
+# Library only, if you do not need HTTP:
+pip install "embedx-inference[gpu]"
+```
+
+Nothing in the request or configuration surface changed in this release. If
+`embedx serve` is missing after upgrading, the install is the library one;
+`embedx --help` says so explicitly.
 
 ## [0.2.0] - 2026-08-02
 
