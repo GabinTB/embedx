@@ -221,3 +221,4 @@ __marimo__/
 # JIT-compiled kernels; never committed.
 cache/
 docker-compose.override.yml
+.claude/
