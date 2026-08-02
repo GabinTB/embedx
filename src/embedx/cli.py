@@ -4,6 +4,13 @@ Importable without the GPU extra — torch enters only when a model is
 actually loaded, which no command does at startup any more. `serve` builds
 an empty registry; `check --warm` is the one path that loads on purpose.
 
+Importable without the HTTP layer, too. The PyPI wheel ships the library and
+excludes `embedx.api`, so `serve` is registered only when that package is
+actually present (see `_api_available`). This module must therefore never
+import `embedx.api` at module level: the console script is `embedx.cli:app`,
+so a module-level import would make a library install fail on `--help` and
+`info` as well, not just on the one command that needs it.
+
 Precedence note: `Settings` treats init kwargs as highest priority
 (CLI > env > file > defaults), so an option the user did not pass must
 never reach `Settings`. Every option below defaults to the `None`
@@ -13,6 +20,7 @@ typer defaults would silently override `EMBEDX_*` and the config file.
 
 from __future__ import annotations
 
+import importlib.util
 import logging
 from typing import Annotated, Any
 
@@ -21,7 +29,6 @@ from pydantic import ValidationError
 from pydantic_settings import SettingsError
 
 from embedx import __version__
-from embedx.api import create_app
 from embedx.config import Pooling, Settings
 from embedx.gpu.budgets import device_budgets
 from embedx.gpu.discovery import discover_devices, rank_devices
@@ -32,9 +39,32 @@ logger = logging.getLogger("embedx.cli")
 
 VALID_LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
 
+# Said in `--help` rather than raised at runtime. Someone who came looking for
+# `serve` and does not find it should learn where the server went, not
+# conclude the project has none.
+_NO_SERVER_EPILOG = (
+    "This install is the library only, so `serve` is not available. The HTTP "
+    "server ships with the Docker image or a source install "
+    "(github.com/GabinTB/embedx); everything else here works as documented."
+)
+
+
+def _api_available() -> bool:
+    """Whether the HTTP layer was installed alongside the library.
+
+    `find_spec` rather than a try/except import: this runs at import time on
+    every CLI invocation, and importing `embedx.api` would pull in fastapi
+    just to decide whether to offer one subcommand.
+    """
+    return importlib.util.find_spec("embedx.api") is not None
+
+
+_HAS_API = _api_available()
+
 app = typer.Typer(
     name="embedx",
     help="Heterogeneous multi-GPU text embedding server.",
+    epilog=None if _HAS_API else _NO_SERVER_EPILOG,
     no_args_is_help=True,
     add_completion=False,
 )
@@ -156,7 +186,6 @@ def _run_uvicorn(application: Any, settings: Settings) -> None:
     )
 
 
-@app.command()
 def serve(
     revision: RevisionOpt = None,
     normalize: NormalizeOpt = None,
@@ -184,6 +213,12 @@ def serve(
     ranked = _ranked_devices(settings)
     registry = _build_registry(settings, ranked)
     registry.start()
+    # Imported here, not at module level, for two reasons. It must stay out of
+    # `locals()` above, which is forwarded verbatim to `Settings` and would
+    # reject an unknown key; and this module has to import on a library
+    # install where `embedx.api` is absent (see the module docstring).
+    from embedx.api import create_app
+
     application = create_app(settings, registry)
 
     logger.info("binding http://%s:%d", settings.host, settings.port)
@@ -213,6 +248,15 @@ def serve(
     finally:
         registry.stop()
         registry.evict_all()
+
+
+# Registered only when the HTTP layer is installed. On a library-only wheel
+# `serve` is therefore absent from `--help` rather than present and failing,
+# which is why no runtime error for the missing case exists anywhere below.
+# Registration happens here rather than at the end of the module so the
+# command order in `--help` stays serve, info, check.
+if _HAS_API:
+    app.command()(serve)
 
 
 @app.command()

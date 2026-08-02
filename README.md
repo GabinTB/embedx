@@ -31,13 +31,34 @@ docker compose up -d --build  # ~12 GB, ~5 min; almost all of it torch + CUDA
 ```
 
 **Or on the host**, if it already has a matching Python, a C compiler and the
-driver:
+driver. The server installs from source, because that is where it ships:
 
 ```bash
-uv venv && uv pip install "embedx[gpu]"      # needs an NVIDIA driver; see DEPLOY.md
+uv venv
+EMBEDX_BUILD_SERVER=1 uv pip install \
+  "embedx-inference[gpu,server] @ git+https://github.com/GabinTB/embedx"
 
 embedx serve                                 # starts with no model loaded
 ```
+
+`EMBEDX_BUILD_SERVER=1` is what includes the HTTP layer in the build; without
+it you get the library and `embedx serve` will not exist. `[server]` supplies
+its dependencies, the flag supplies its modules.
+
+**Or as a library**, for a batch job that wants the multi-GPU scheduling
+without an HTTP round-trip in the middle:
+
+```bash
+uv pip install "embedx-inference[gpu]"       # then: import embedx as ebx
+```
+
+The distribution is `embedx-inference`; the import name is plain `embedx`.
+They differ because `embedx` on PyPI has belonged to an unrelated 2016
+project since before this one existed — the same split as
+`scikit-learn`/`sklearn`. The PyPI wheel is the **library** (batching,
+scheduler, `Engine`, device ranking, model registry, config); the HTTP server
+ships with the Docker image or a source install, so `embedx serve` exists on
+those and not on a plain `pip install`.
 
 Name the model in the request. The first one to name it loads it, and
 `pooling` is required on that first load — it is never inferred, because the

@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import ast
 import logging
 from collections.abc import Iterator
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -21,6 +23,43 @@ GIB = 2**30
 
 # No model arguments any more: a server is started without naming one.
 BASE_ARGS: list[str] = []
+
+
+def test_cli_does_not_import_the_http_layer_at_module_level() -> None:
+    """The whole CLI must survive a wheel that ships no `embedx.api`.
+
+    The console script is `embedx.cli:app`, so a module-level
+    `from embedx.api import ...` would make `--help`, `info` and `check` fail
+    on a library install too -- not just `serve`, the one command that
+    actually needs it. This is a guard, not a style rule: the import was at
+    module level until task 21, and nothing else in the suite would notice it
+    coming back.
+    """
+    tree = ast.parse(Path(cli.__file__).read_text(), filename=cli.__file__)
+    offenders = [
+        node.module or ""
+        for node in tree.body  # module level only; inside `serve` is fine
+        if isinstance(node, ast.ImportFrom) and (node.module or "").startswith("embedx.api")
+    ] + [
+        alias.name
+        for node in tree.body
+        if isinstance(node, ast.Import)
+        for alias in node.names
+        if alias.name.startswith("embedx.api")
+    ]
+    assert not offenders, f"cli.py imports the HTTP layer at module level: {offenders}"
+
+
+def test_serve_is_registered_when_the_http_layer_is_present() -> None:
+    """The other half of the conditional: present here, absent on a wheel.
+
+    CI asserts the absent case against the real artifact; this asserts the
+    source checkout still offers the command it is supposed to.
+    """
+    assert cli._api_available()
+    result = runner.invoke(cli.app, ["--help"])
+    assert result.exit_code == 0, output_of(result)
+    assert "serve" in output_of(result)
 
 
 def make_device(index: int, name: str = "Fake GPU") -> DeviceInfo:

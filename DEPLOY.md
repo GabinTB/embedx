@@ -261,17 +261,36 @@ then fail on every request after a routine `pip install -U torch`, with
 nothing in your own configuration having changed. If you upgrade torch,
 re-run the check above.
 
+**Install from source, not from PyPI, and set `EMBEDX_BUILD_SERVER=1`.** The
+PyPI distribution is `embedx-inference` and it ships the *library* only: the
+HTTP layer is excluded from that wheel, so `embedx serve` — which this unit's
+`ExecStart` runs — does not exist on a plain `pip install`. Two separate
+things are needed for it, and missing either one gives you a working install
+with no server: the `server` extra supplies the HTTP **dependencies**, and
+`EMBEDX_BUILD_SERVER=1` supplies the **modules** at build time.
+
+If you get this wrong the unit fails at `ExecStart` with `No such command
+'serve'`, and `embedx --help` will tell you the install is library-only.
+
 With uv, into a dedicated venv (the path the unit file expects):
 
 ```bash
 uv venv /opt/embedx/.venv
-VIRTUAL_ENV=/opt/embedx/.venv uv pip install "embedx[gpu]"
+EMBEDX_BUILD_SERVER=1 VIRTUAL_ENV=/opt/embedx/.venv uv pip install \
+  "embedx-inference[gpu,server] @ git+https://github.com/GabinTB/embedx"
 ```
 
 Or with pipx:
 
 ```bash
-pipx install "embedx[gpu]"
+EMBEDX_BUILD_SERVER=1 pipx install \
+  "embedx-inference[gpu,server] @ git+https://github.com/GabinTB/embedx"
+```
+
+Verify before enabling the unit:
+
+```bash
+/opt/embedx/.venv/bin/embedx --help | grep -q serve && echo "server present"
 ```
 
 If you use pipx or another venv location, adjust `ExecStartPre` and

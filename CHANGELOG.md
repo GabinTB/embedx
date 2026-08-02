@@ -6,6 +6,34 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed — packaging
+
+- **The PyPI distribution is now `embedx-inference`.** The import name is
+  still `embedx` and the repository is still `embedx`; only the name you
+  `pip install` changed. `embedx` on PyPI has belonged to an unrelated 2016
+  project since before this one existed, and PyPI normalises `embedX` to
+  `embedx`, so the short name was never available — the previous
+  `name = "embedx"` could not have been published at all. Distribution and
+  import names differing is ordinary (`scikit-learn`/`sklearn`,
+  `beautifulsoup4`/`bs4`).
+- **That distribution ships the library, not the server.** Batching, the
+  converging scheduler, `Engine`, device ranking and budgets, the model
+  registry and config — for a batch job that wants multi-GPU scheduling
+  without an HTTP round-trip in the middle. `embedx.api` is excluded from
+  the wheel, and `embedx serve` is registered only when that package is
+  importable, so on a library install the subcommand is absent from
+  `--help` rather than present and broken.
+- **The HTTP server ships via Docker or a source install**, which is where
+  the Python, torch, CUDA and C-toolchain versions are pinned and tested
+  together. A source install needs both `[server]`, for the HTTP
+  dependencies, and `EMBEDX_BUILD_SERVER=1`, which includes the modules at
+  build time; `pip install .` builds the same excluded wheel, so the flag is
+  what distinguishes a server build from a library one. The Dockerfile sets
+  it and then fails the build if `embedx.api` did not land.
+- `fastapi`, `anyio` and `uvicorn[standard]` moved out of the core
+  dependencies into the new `server` extra. A library install no longer
+  pulls in a web framework it has no module to use.
+
 ## [0.2.0] - 2026-08-02
 
 **This is a breaking release. Existing configuration will not start.**

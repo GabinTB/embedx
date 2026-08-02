@@ -1,4 +1,6 @@
-# The build needs pyproject.toml, README.md and src/ — nothing else.
+# The build needs pyproject.toml, README.md, hatch_build.py and src/ — nothing
+# else. hatch_build.py is what re-includes the HTTP layer for this image; drop
+# it from the context and the build produces a server with no server in it.
 # Everything here either bloats the image, invalidates the cache on every
 # edit, or has no business inside a container.
 

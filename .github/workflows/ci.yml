@@ -74,6 +74,30 @@ jobs:
           uv venv /tmp/smoke --python ${{ matrix.python-version }}
           uv pip install --python /tmp/smoke/bin/python dist/*.whl
 
+      # The wheel ships the library and excludes `embedx.api` (task 21). An
+      # exclusion nobody checks is one that silently stops working, which is
+      # exactly how the smoke command below drifted for several commits, so
+      # the contents are asserted rather than assumed.
+      - name: The wheel must not contain the API layer
+        run: |
+          python - <<'PY'
+          import glob, sys, zipfile
+          wheel = glob.glob("dist/*.whl")
+          assert len(wheel) == 1, f"expected one wheel, got {wheel}"
+          names = zipfile.ZipFile(wheel[0]).namelist()
+          leaked = [n for n in names if n.startswith("embedx/api/")]
+          assert not leaked, f"the HTTP layer leaked into the wheel: {leaked}"
+          # The exclusion must not have taken the library with it.
+          for required in ("embedx/registry.py", "embedx/engine/engine.py"):
+              assert required in names, f"{required} missing from the wheel"
+          print(f"{wheel[0]}: no embedx/api/, library intact")
+          PY
+
+      # `import embedx` alone would prove almost nothing -- __init__.py is
+      # three lines and imports nothing. These are the modules that would pull
+      # torch in if the lazy-import discipline ever broke, so they are named
+      # explicitly and torch's absence is asserted rather than implied.
+      #
       # `info` takes no model: since task 15 models are named per request and
       # pooling is resolved per model at first load, so --model-id/--pooling
       # no longer exist. Bare `info` still exercises the real work -- settings
@@ -81,6 +105,19 @@ jobs:
       # registry, which is empty in a fresh process.
       - name: Torch-free import and CLI smoke
         run: |
-          /tmp/smoke/bin/python -c "import embedx; print(embedx.__version__)"
+          /tmp/smoke/bin/python - <<'PY'
+          import sys
+          import embedx, embedx.backend, embedx.config, embedx.engine
+          import embedx.gpu, embedx.registry
+          assert "torch" not in sys.modules, "importing the library pulled in torch"
+          print(embedx.__version__)
+          PY
           /tmp/smoke/bin/embedx --help
           /tmp/smoke/bin/embedx info
+          # `serve` is registered conditionally on embedx.api being importable,
+          # so on this wheel it must not exist. Asserted as a missing command
+          # rather than by grepping --help, whose epilogue mentions the word.
+          if /tmp/smoke/bin/embedx serve --help; then
+            echo "::error::serve is registered on a wheel that excludes embedx.api"
+            exit 1
+          fi

@@ -67,9 +67,20 @@ RUN uv pip install --python /opt/venv/bin/python \
         "torch==${TORCH_VERSION}"
 
 WORKDIR /src
-COPY pyproject.toml README.md ./
+COPY pyproject.toml README.md hatch_build.py ./
 COPY src ./src
-RUN uv pip install --python /opt/venv/bin/python ".[gpu]"
+# EMBEDX_BUILD_SERVER=1 IS LOAD BEARING. The wheel target excludes
+# `embedx.api` so the PyPI distribution is the library alone (task 21), and
+# `pip install .` builds that same target -- so without this the image would
+# install cleanly, expose every other command, and have no `embedx serve` at
+# all. `[server]` brings the HTTP dependencies; the flag brings the modules.
+RUN EMBEDX_BUILD_SERVER=1 uv pip install --python /opt/venv/bin/python ".[gpu,server]"
+
+# The image is worthless without the server, and the failure would otherwise
+# surface as a missing subcommand at `docker compose up`. Fail the build.
+RUN /opt/venv/bin/python -c "\
+import embedx.api, sys; \
+print('http layer present:', embedx.api.__file__)"
 
 # Fail the BUILD, not the first request, if the wheel lacks Blackwell kernels.
 # A code abstraction cannot change which kernels a wheel was compiled with, and

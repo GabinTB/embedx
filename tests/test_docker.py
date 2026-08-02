@@ -87,6 +87,24 @@ def test_build_fails_if_the_wheel_lacks_blackwell_kernels(dockerfile: str) -> No
     assert "torch.cuda.get_arch_list()" not in dockerfile.split("AS runtime")[0]
 
 
+def test_image_builds_with_the_http_layer_included(dockerfile: str) -> None:
+    """The image is the server; a library-only build would be silently useless.
+
+    `[tool.hatch.build.targets.wheel] exclude` drops `embedx.api` so the PyPI
+    wheel is the library alone (task 21), and `pip install .` builds that same
+    target. Both halves are needed here and neither implies the other: the
+    `server` extra supplies the HTTP dependencies, `EMBEDX_BUILD_SERVER=1`
+    supplies the modules. Without the flag the image would build, install and
+    start with no `embedx serve` at all.
+    """
+    assert "EMBEDX_BUILD_SERVER=1" in dockerfile
+    assert '".[gpu,server]"' in dockerfile
+    # hatch_build.py implements the re-inclusion, so it must reach the context.
+    assert "hatch_build.py" in dockerfile
+    # And the build must prove it landed rather than trusting the flag.
+    assert "import embedx.api" in dockerfile
+
+
 def test_no_model_weights_are_baked_in(dockerfile: str) -> None:
     """Weights live in the mounted cache; task 17 measured why."""
     for pattern in ("snapshot_download", "huggingface-cli download", "hf download"):
