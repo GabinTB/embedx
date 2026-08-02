@@ -23,7 +23,13 @@ services:
     # builds locally and tags the result with this same name, so both paths
     # run through this one file. Bump on release, together with the version
     # in pyproject.toml.
-    image: ghcr.io/gabintb/embedx:0.3.0
+    #
+    # The same image is published to both Docker Hub and GHCR by `make
+    # image-push`. Docker Hub is the default here because it is the shorter
+    # name; if you hit its anonymous pull rate limit, override with
+    # EMBEDX_IMAGE=ghcr.io/gabintb/embedx:0.3.0 in .env -- GHCR does not
+    # rate-limit anonymous pulls.
+    image: ${EMBEDX_IMAGE:-gabintb/embedx:0.3.0}
     container_name: embedx
 
     # Runs as YOUR uid, not the image's baked-in 10001, so the bind-mounted

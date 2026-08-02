@@ -49,13 +49,25 @@ Toolkit](DEPLOY.md#prerequisites).
 git clone https://github.com/GabinTB/embedx && cd embedx
 cp .env.example .env          # set EMBEDX_UID/GID to `id -u` / `id -g`
 mkdir -p cache/hf cache/triton
-docker compose up -d          # pulls ghcr.io/gabintb/embedx, ~12 GB
+docker compose up -d          # pulls gabintb/embedx, ~12 GB
 ```
 
 The compose file supplies what a bare `docker run` would not: GPU passthrough,
-the two cache bind mounts, and a loopback-only published port. If you are
-modifying source, build the image instead of pulling it — same file, same
-resulting tag:
+the two cache bind mounts, and a loopback-only published port.
+
+The identical image is published to two registries:
+
+| registry | pull | notes |
+|---|---|---|
+| **Docker Hub** | `docker pull gabintb/embedx:0.3.0` | Default. **Anonymous pulls are rate-limited** by Docker. |
+| **GHCR** | `docker pull ghcr.io/gabintb/embedx:0.3.0` | Same bytes, **no anonymous pull rate limit**. |
+
+If you hit Docker Hub's limit — likely on shared CI egress, unlikely on a
+workstation — set `EMBEDX_IMAGE=ghcr.io/gabintb/embedx:0.3.0` in `.env` and
+compose will pull from GHCR instead.
+
+If you are modifying source, build the image rather than pulling it — same
+file, same resulting tag:
 
 ```bash
 docker compose up -d --build  # ~5 min; almost all of it torch + CUDA

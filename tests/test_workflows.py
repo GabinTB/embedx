@@ -159,9 +159,36 @@ def test_image_is_released_from_the_makefile_not_a_workflow() -> None:
     """The image is pushed from a GPU host; CI cannot verify what it builds."""
     makefile = MAKEFILE.read_text()
     assert "image-push:" in makefile
-    assert "ghcr.io/gabintb/embedx" in makefile
     # The push must be gated on the image actually having a server in it.
     assert "image-verify" in makefile
     assert "serve --help" in makefile
     # And the flag stays in the Dockerfile, where no caller can forget it.
-    assert "EMBEDX_BUILD_SERVER=1" not in makefile.split("image:", 1)[1]
+    recipes = makefile.split("\nimage:", 1)[1]
+    assert "EMBEDX_BUILD_SERVER" not in recipes
+
+
+def test_image_goes_to_both_registries() -> None:
+    """Docker Hub and GHCR, from one build.
+
+    Named separately from the gate test because the failure modes differ: this
+    one catches a registry silently dropping out of the release, which nobody
+    would notice until someone's pull 404s.
+    """
+    makefile = MAKEFILE.read_text()
+    assert "IMAGE_REPO ?= gabintb/embedx" in makefile
+    for registry in ("docker.io/$(IMAGE_REPO)", "ghcr.io/$(IMAGE_REPO)"):
+        assert registry in makefile, f"{registry} is no longer a push destination"
+
+
+def test_verification_gates_every_registry_not_just_the_first() -> None:
+    """Two destinations must not mean a weaker gate.
+
+    `image-verify` loops over REGISTRIES rather than checking one tag, so a
+    typo or a stale tag fails before the push instead of after it.
+    """
+    makefile = MAKEFILE.read_text()
+    verify = makefile.split("image-verify:", 1)[1].split("\nimage-push:", 1)[0]
+    assert "for reg in $(REGISTRIES)" in verify
+    assert "serve --help" in verify
+    # image-push must depend on both building and verifying, in that order.
+    assert "image-push: image image-verify" in makefile

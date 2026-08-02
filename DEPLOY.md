@@ -69,18 +69,38 @@ passthrough. This is not "cross-platform".
 git clone https://github.com/GabinTB/embedx && cd embedx
 cp .env.example .env          # set EMBEDX_UID/GID to `id -u` / `id -g`
 mkdir -p cache/hf cache/triton
-docker compose up -d          # pulls ghcr.io/gabintb/embedx
+docker compose up -d          # pulls gabintb/embedx
 ```
 
 `docker compose up -d` pulls the published image. Add `--build` to build it
 locally instead, which is what you want if you are modifying source; both
 produce the same image tag, so the rest of this document applies either way.
 
+### Which registry
+
+The same image — one build, one verification, two destinations — is published
+to both:
+
+| registry | pull | notes |
+|---|---|---|
+| **Docker Hub** (default) | `docker pull gabintb/embedx:0.3.0` | Shorter name. Docker applies **anonymous pull rate limits**, counted per source IP. |
+| **GHCR** | `docker pull ghcr.io/gabintb/embedx:0.3.0` | Identical bytes. **No anonymous pull rate limit.** |
+
+Compose uses Docker Hub unless you say otherwise. To switch — worth doing on a
+build host behind shared NAT, or in CI, where the rate limit is counted
+against everyone sharing your egress IP:
+
+```bash
+# in .env
+EMBEDX_IMAGE=ghcr.io/gabintb/embedx:0.3.0
+```
+
 Expect **12 GB** either way, and **~5 minutes** if you are building. That size
 is normal for a torch + CUDA image and is why CI neither builds nor publishes
 it: a GitHub-hosted runner has roughly 21 GB free against a 20-25 GB build,
-and no GPU to verify the result with. Images are built and pushed from a GPU
-host with `make image-push`.
+and no GPU to verify the result with. Images are built once and pushed to both
+registries from a GPU host with `make image-push`, which refuses to push
+anything whose `embedx serve` does not actually work.
 
 ```bash
 curl http://127.0.0.1:8477/health

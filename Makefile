@@ -32,25 +32,51 @@ gate: lint test
 # asserts that.
 # --------------------------------------------------------------------------- #
 
-IMAGE ?= ghcr.io/gabintb/embedx
+# ONE build, ONE verification, two registries. The tags below all name the
+# same image id, so pushing to both distributes bytes that were checked here
+# rather than two independently-produced images that could differ.
+IMAGE_REPO ?= gabintb/embedx
+REGISTRIES ?= docker.io/$(IMAGE_REPO) ghcr.io/$(IMAGE_REPO)
 VERSION := $(shell sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml | head -1)
 
+# -t <registry>:<version> -t <registry>:latest, for each registry.
+IMAGE_TAGS := $(foreach reg,$(REGISTRIES),-t $(reg):$(VERSION) -t $(reg):latest)
+
 image:
-	docker build -t $(IMAGE):$(VERSION) -t $(IMAGE):latest .
+	docker build $(IMAGE_TAGS) .
 
 # The failure this catches is the one that is otherwise silent: an image with
 # no `serve` still builds, still starts, and still passes the healthcheck.
 # Needs no GPU -- `--help` short-circuits before any device is touched.
+#
+# Run per registry tag, not once against the image id. The tags do resolve to
+# the same bytes, so this is not re-verifying the build -- it is verifying
+# that each tag ACTUALLY POINTS AT the thing that was verified. A typo in
+# REGISTRIES, or a stale tag left by an earlier build, fails here instead of
+# being pushed. Adding a second destination must not make the gate weaker.
 image-verify:
-	@echo "verifying $(IMAGE):$(VERSION)"
-	@docker run --rm --entrypoint embedx $(IMAGE):$(VERSION) serve --help > /dev/null \
-	  || { echo "FATAL: no 'serve' in $(IMAGE):$(VERSION) -- built without the HTTP layer"; exit 1; }
-	@docker run --rm --entrypoint embedx $(IMAGE):$(VERSION) --version
-	@echo "ok: serve present"
+	@for reg in $(REGISTRIES); do \
+	  echo "verifying $$reg:$(VERSION)"; \
+	  docker run --rm --entrypoint embedx $$reg:$(VERSION) serve --help > /dev/null \
+	    || { echo "FATAL: no 'serve' in $$reg:$(VERSION) -- built without the HTTP layer"; exit 1; }; \
+	  docker run --rm --entrypoint embedx $$reg:$(VERSION) --version > /dev/null \
+	    || { echo "FATAL: $$reg:$(VERSION) does not run"; exit 1; }; \
+	done
+	@echo "ok: serve present in every tagged registry ($(VERSION))"
 
-# Requires `docker login ghcr.io -u <you>` with a PAT carrying write:packages.
+# Credentials come from the local docker credential store and are NEVER in
+# this file or the repository. Log in once per registry, each with an access
+# token rather than a password:
+#
+#   docker login docker.io   -u gabintb   # Docker Hub access token
+#   docker login ghcr.io     -u GabinTB   # GitHub PAT with write:packages
+#
 # Pushes the version tag and moves `latest`; run it only for a real release.
+# The build and the verification are prerequisites, so `latest` cannot move
+# to an image that has not passed the gate.
 image-push: image image-verify
-	docker push $(IMAGE):$(VERSION)
-	docker push $(IMAGE):latest
-	@echo "pushed $(IMAGE):$(VERSION) and :latest"
+	@for reg in $(REGISTRIES); do \
+	  docker push $$reg:$(VERSION) || exit 1; \
+	  docker push $$reg:latest || exit 1; \
+	done
+	@echo "pushed $(VERSION) and latest to: $(REGISTRIES)"

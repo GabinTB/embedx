@@ -29,9 +29,16 @@ source and expected `serve`; see [Migration](#migration-from-02x) below.
 - `scripts/check_library_wheel.py`, the single wheel-contents assertion —
   no `embedx/api/`, no `.service`, library intact — shared by the CI
   packaging job and the publish workflow rather than duplicated in both.
+- **The container image is published to Docker Hub and GHCR**, from one build
+  and one verification: `gabintb/embedx` and `ghcr.io/gabintb/embedx`, each
+  tagged with the version and `latest`. Docker Hub is the default because the
+  name is shorter; GHCR is the identical image without Docker's anonymous
+  pull rate limit, and `EMBEDX_IMAGE` in `.env` switches compose to it.
 - `make image` / `make image-push`, the documented path for building and
-  pushing the GHCR image from a GPU host. See below for why this is not a
-  workflow.
+  pushing that image from a GPU host. See below for why this is not a
+  workflow. `image-verify` runs `embedx serve --help` inside every tagged
+  registry before anything is pushed, so a second destination does not mean a
+  weaker gate.
 - A `server` extra naming the HTTP dependencies (`fastapi`, `anyio`,
   `uvicorn[standard]`).
 
@@ -90,7 +97,7 @@ source and expected `serve`; see [Migration](#migration-from-02x) below.
 
 ### Known limitations
 
-- The GHCR image is **pushed manually from a GPU host**, not built in CI.
+- The container image is **pushed manually from a GPU host**, not built in CI.
   A GitHub-hosted runner starts with roughly 21 GB free and this image needs
   around 20-25 GB to build (the 7.36 GB `/opt/venv` layer is materialised in
   both the builder and the runtime stage), so it would need a disk-cleanup
@@ -107,7 +114,7 @@ EMBEDX_BUILD_SERVER=1 pip install \
   "embedx-inference[gpu,server] @ git+https://github.com/GabinTB/embedx"
 
 # Server, from the image (no Python involved):
-docker pull ghcr.io/gabintb/embedx:0.3.0
+docker pull gabintb/embedx:0.3.0            # or ghcr.io/gabintb/embedx:0.3.0
 
 # Library only, if you do not need HTTP:
 pip install "embedx-inference[gpu]"
