@@ -43,7 +43,7 @@ Isolate four stages, timed separately, never lumped into one "load" number:
 Run this for the largest production-relevant model on both devices
 independently (some stages, like stage 3, are expected to differ
 significantly given the measured PCIe gap between the two cards), and once
-more for a small model (RavenBERT-embedding or MiniLM) as a size-scaling
+more for a small model (e5-small-v2 or MiniLM) as a size-scaling
 comparison point, so the write-up can say whether the dominant cost scales
 with model size or is roughly fixed per load.
 

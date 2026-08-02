@@ -26,8 +26,10 @@
 ARG CUDA_IMAGE=nvidia/cuda:12.8.1-base-ubuntu24.04
 ARG TORCH_INDEX_URL=https://download.pytorch.org/whl/cu128
 # 2.11.0 is the newest cu128 build: 2.12 and 2.13 ship cu130 only. cp314
-# wheels exist on cu128 from 2.9.0 onward. Verified against the index, and
-# `docs/` records the arch list this wheel actually carries.
+# wheels exist on cu128 from 2.9.0 onward. Verified against the index; the
+# build below fails outright if the resolved wheel lacks sm_120, and
+# DEPLOY.md ("Confirming Blackwell kernels") shows how to read the arch list
+# back out of a running container.
 ARG TORCH_VERSION=2.11.0
 ARG PYTHON_VERSION=3.14
 ARG UV_VERSION=0.12.1

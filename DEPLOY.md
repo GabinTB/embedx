@@ -56,7 +56,7 @@ passthrough. This is not "cross-platform".
 ### Build and run
 
 ```bash
-git clone https://github.com/<you>/embedx && cd embedx
+git clone https://github.com/GabinTB/embedx && cd embedx
 cp .env.example .env          # set EMBEDX_UID/GID to `id -u` / `id -g`
 mkdir -p cache/hf cache/triton
 docker compose up -d --build

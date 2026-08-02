@@ -23,8 +23,10 @@ To execute one headlessly instead of in the browser:
 uv run jupyter nbconvert --to notebook --execute --inplace dev/03_real_gpu_throughput.ipynb
 ```
 
-Notebooks 01-03 were committed unexecuted and later re-run on the GPU host;
-03 and 04 carry their outputs, which are the evidence.
+All four are committed **executed, with their outputs** — that is what makes
+them evidence rather than intent. 01 and 02 run anywhere; 03 and 04 were run
+on the two-GPU host and additionally write machine-readable results to
+`dev/output/`, which is where README figures are transcribed from.
 
 - `01_scheduling_visualization.ipynb` — pure simulation over the real
   `Scheduler`: cursor convergence, per-worker item/token balance, and a
