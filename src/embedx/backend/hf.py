@@ -318,6 +318,44 @@ class HFBackend:
         )
 
     # ------------------------------------------------------------------ #
+    # Teardown
+    # ------------------------------------------------------------------ #
+
+    def close(self) -> None:
+        """Drop the model, so its device memory becomes free to reclaim.
+
+        The registry calls this before `empty_cache`, and until this commit
+        `HFBackend` simply had no `close` — the registry's
+        `getattr(backend, "close", None)` found nothing and eviction relied
+        entirely on the last reference to the backend OBJECT going away at
+        the right moment. It did not: the engine's `length_fn` held one, and
+        the release loop's own variable held another, so `empty_cache` ran
+        with every weight still reachable and returned nothing.
+
+        Nulling the attributes here makes the release independent of that
+        archaeology. Whoever still holds the backend afterwards — a
+        traceback, a frame, a logger — holds an object with no weights in
+        it, and `empty_cache` frees the blocks either way.
+
+        The tokenizers go too: they are the deepcopy pair from
+        `_install_tokenizer_guards`, host memory rather than device, but a
+        backend kept alive by a stale reference should not keep a vocabulary
+        alive either.
+
+        Idempotent, and never raises: it runs on the eviction path and on
+        the load-failure path, and a teardown that can fail turns one
+        problem into two.
+        """
+        self._model = None
+        self._st_model = None
+        self._tokenizer = None
+        self._length_tokenizer = None
+        # Shared with every other device serving this model; dropping the
+        # reference is this backend's share of it, not a clear() that would
+        # yank the cache out from under a sibling still finishing a batch.
+        self._length_cache = TokenLengthCache()
+
+    # ------------------------------------------------------------------ #
     # Embedding
     # ------------------------------------------------------------------ #
 

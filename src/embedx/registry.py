@@ -42,6 +42,7 @@ daemon so a killed server never hangs on it, and `stop()` uses an
 
 from __future__ import annotations
 
+import gc
 import logging
 import threading
 import time
@@ -740,42 +741,72 @@ class ModelRegistry:
         backends: list[EmbeddingBackend] = []
         placed: list[DeviceInfo] = []
         failures: list[tuple[int, str]] = []
+        engine: Engine | None = None
 
-        for device in self.devices:
-            try:
-                backend = self._backend_factory(
-                    model_id=model_id,
-                    device_index=device.index,
-                    pooling=pooling,
-                    normalize=self._settings.normalize,
-                    dtype=dtype,
-                    max_seq_length=max_seq_len,
-                    revision=self._settings.revision,
-                    length_cache=length_cache,
-                )
-            except Exception as exc:
-                if not _is_out_of_memory(exc, self._accelerator):
-                    raise
-                failures.append((device.index, f"{type(exc).__name__}: {exc}"))
-                # Whatever was allocated before the OOM is still held; the
-                # next device starts clean only if it is released now.
-                self._accelerator.empty_cache(device.index)
-                logger.info(
-                    "%s did not fit on device %d (%s); trying the next device",
-                    model_id,
-                    device.index,
-                    type(exc).__name__,
-                )
-                continue
-            backends.append(backend)
-            placed.append(device)
+        try:
+            for device in self.devices:
+                try:
+                    backend = self._backend_factory(
+                        model_id=model_id,
+                        device_index=device.index,
+                        pooling=pooling,
+                        normalize=self._settings.normalize,
+                        dtype=dtype,
+                        max_seq_length=max_seq_len,
+                        revision=self._settings.revision,
+                        length_cache=length_cache,
+                    )
+                except Exception as exc:
+                    if not _is_out_of_memory(exc, self._accelerator):
+                        raise
+                    failures.append((device.index, f"{type(exc).__name__}: {exc}"))
+                    # Whatever was allocated before the OOM is still held; the
+                    # next device starts clean only if it is released now.
+                    #
+                    # And it is `exc` that holds it. Its traceback pins the
+                    # frame of the constructor that raised, and that frame
+                    # pins the half-built backend with however many layers
+                    # reached the card before it ran out. Python drops `exc`
+                    # at the end of this block — one line too late, since
+                    # `empty_cache` runs inside it and frees only what is
+                    # already unreachable. The message above is a string and
+                    # keeps nothing, so the traceback can go now.
+                    exc.__traceback__ = None
+                    # And the same collection `_release_backends` explains:
+                    # a half-built transformer is as cyclic as a whole one,
+                    # so unreachable is not yet freed. This is the path a
+                    # client retry loop hammers, which makes it the one
+                    # place where not reclaiming compounds.
+                    gc.collect()
+                    self._accelerator.empty_cache(device.index)
+                    logger.info(
+                        "%s did not fit on device %d (%s); trying the next device",
+                        model_id,
+                        device.index,
+                        type(exc).__name__,
+                    )
+                    continue
+                backends.append(backend)
+                placed.append(device)
 
-        if not backends:
-            raise ModelPlacementError(model_id, failures)
+            if not backends:
+                raise ModelPlacementError(model_id, failures)
 
-        engine = engine_from_backends(backends, placed, self._settings)
-        if self._settings.smoke_test_on_load:
-            self._smoke_test(model_id, engine, backends, placed)
+            engine = engine_from_backends(backends, placed, self._settings)
+            if self._settings.smoke_test_on_load:
+                self._smoke_test(model_id, engine, placed)
+        except BaseException:
+            # A load that fails PART WAY THROUGH is the dangerous one: the
+            # devices that already succeeded hold a full model copy each,
+            # and `backends` is a local of a frame that is about to unwind,
+            # so nothing downstream ever sees them to free them. Retry, and
+            # the card fills a model at a time.
+            #
+            # BaseException, not Exception: a KeyboardInterrupt or a
+            # cancellation part way through a load strands VRAM exactly as
+            # thoroughly as an error does.
+            self._release_backends(model_id, engine, backends, placed)
+            raise
 
         now = time.monotonic()
         # WARNING, not INFO: this is the moment a model's pooling is fixed
@@ -813,7 +844,6 @@ class ModelRegistry:
         self,
         model_id: str,
         engine: Engine,
-        backends: list[EmbeddingBackend],
         placed: list[DeviceInfo],
     ) -> None:
         """Embed one string before the model can become resident.
@@ -830,9 +860,12 @@ class ModelRegistry:
         `/info` calls healthy and that raises on every request forever.
 
         Runs BEFORE `_entries[model_id]` is set, so a failure leaves nothing
-        visible to `list_loaded()`. On failure the backends are released and
-        device memory returned before raising, or a refused model would go
-        on occupying VRAM with nothing holding a reference to free it.
+        visible to `list_loaded()`. Releasing the backends on failure is
+        `_load`'s job, not this method's: it wraps the whole placement in
+        one handler, so a refused model gives its VRAM back by the same
+        route whether the smoke test failed, a device OOMed, or the
+        constructor raised something else entirely. One release path, not
+        three that can drift.
         """
         # SPEC-GAP: one item exercises the Engine plus whichever worker wins
         # the claim, not every device. The scheduler is work-stealing, so
@@ -853,7 +886,6 @@ class ModelRegistry:
                 model_id,
                 [device.index for device in placed],
             )
-            self._release_backends(model_id, engine, backends, placed)
             raise SmokeTestFailedError(
                 model_id,
                 [device.index for device in placed],
@@ -873,29 +905,74 @@ class ModelRegistry:
     def _release_backends(
         self,
         model_id: str,
-        engine: Engine,
+        engine: Engine | None,
         backends: list[EmbeddingBackend],
         devices: list[DeviceInfo],
     ) -> None:
         """Drop a model's backends and hand its device memory back.
 
-        Shared by eviction and by a failed smoke test, so both follow the
-        same release ORDER — which is the part that is easy to get wrong.
-        Device memory returns only when the last Python reference to the
-        model's tensors is gone, and the Engine holds one per backend, so
-        both it and the caller's list must release before `empty_cache` is
-        asked for the blocks back. Doing it the other way round frees
-        nothing.
+        Shared by eviction and by every load-failure path, so all of them
+        follow the same release ORDER — which is the part that is easy to
+        get wrong, and which this function got wrong in 0.3.0. Device memory
+        returns only when the last Python reference to the model's tensors
+        is gone, and `empty_cache` returns only blocks the allocator already
+        considers free, so anything still reachable when it runs is simply
+        not freed. There is no error and no warning; `/info` reports no
+        models and `nvidia-smi` reports the full weight, indefinitely.
+
+        Three references had to die before `empty_cache`. Only the caller's
+        list released; the other two are the leak:
+
+        1. The backend's own tensors. `HFBackend` had no `close`, so the
+           `getattr` below found nothing and this loop was a no-op against
+           the real backend. It now has one, and that alone makes the
+           release robust: the weights go whether or not some frame is
+           still holding the backend object.
+        2. `Engine._length_fn`, a bound method of `backends[0]`, which
+           `Engine.close()` did not reset. Device 0 only — which is exactly
+           the shape the production report had.
+        3. `backend`, the loop variable BELOW. A `for` loop leaves its last
+           value bound in this frame, and this frame is alive four lines
+           later when `empty_cache` runs. Hence `while backends: pop()`,
+           which looks fussier than it is: the list must empty AND no name
+           here may outlive it.
+
+        And then a fourth thing, which none of the above would have caught:
+        a loaded transformer is CYCLIC. Making it unreachable is not the
+        same as freeing it — reference counting cannot collect a cycle, so
+        the weights sit in the allocator as uncollected garbage and
+        `empty_cache` walks past them. Measured on this repo's own
+        benchmark model: dropping every reference freed 0 bytes, and the
+        `gc.collect()` below then freed all 43.9 MiB of it. That is why the
+        collection is not optional and not a belt-and-braces flourish; it
+        is the step that does the work.
+
+        The collection is a full stop-the-world pass and it is not free
+        (tens of milliseconds on a large heap). It is affordable here
+        because eviction is rare by construction — a model has been idle
+        for `keep_alive` seconds, or the process is shutting down — and it
+        is the difference between returning a model's VRAM and not.
+
+        `engine` is optional because a load can fail before there is one.
         """
-        for backend in backends:
+        while backends:
+            backend = backends.pop()
             close = getattr(backend, "close", None)
             if callable(close):
                 try:
                     close()
                 except Exception:
+                    # Logged, not raised: teardown continues for every other
+                    # device, and a backend that failed to close is a worse
+                    # reason than most to leave the rest of them loaded.
                     logger.exception("closing backend for %s failed", model_id)
-        engine.close()
-        backends.clear()
+            # See (3) above. `close` is a bound method and pins the backend
+            # just as hard as `backend` does.
+            del close, backend
+        if engine is not None:
+            engine.close()
+        # Between "nothing references it" and "it is freed" — see (4) above.
+        gc.collect()
         for device in devices:
             self._accelerator.empty_cache(device.index)
 

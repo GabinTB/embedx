@@ -6,6 +6,34 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Evicting a model now actually returns its VRAM.** On 0.3.0 an evicted
+  model left its full weight on the card indefinitely: `/info` reported no
+  models while `nvidia-smi` reported 7966 MiB still held by the server
+  process, with nothing in the log. `empty_cache()` returns only blocks the
+  allocator already considers free, and four things stopped the weights from
+  being free at the moment it ran — `HFBackend` had no `close()` at all;
+  `Engine.close()` cleared its backend list but not `_length_fn`, which is a
+  *bound method* of `backends[0]` and therefore carried device 0's entire
+  model (hence the report's device 0 holding the model while device 1 held
+  only its CUDA context); the release loop's own `for` variable kept the last
+  backend alive in a live frame; and a loaded transformer is cyclic, so
+  reference counting could not collect it even once nothing referenced it.
+  Measured on this repo's benchmark model: dropping every reference freed 0
+  bytes, and the added `gc.collect()` freed all 43.9 MiB.
+- **A load that fails after placing the model on some devices now releases
+  them.** Previously the copies already on the card were reachable only from
+  the unwinding frame, so a client retry loop consumed a model's worth of VRAM
+  per attempt. All of placement is now covered by one release path — an OOM,
+  a failed smoke test and any other constructor failure give the memory back
+  by the same route. On the OOM path the exception's traceback is dropped
+  before `empty_cache`, because it pins the frame holding the half-built
+  model.
+- `Engine.token_count()` now raises on a closed engine instead of silently
+  answering in characters, since `close()` drops the injected token-length
+  function along with the backends.
+
 ## [0.3.0] - 2026-08-02
 
 **A plain `pip install` no longer gives you the server.** The distribution is

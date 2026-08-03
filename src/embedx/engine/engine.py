@@ -89,10 +89,19 @@ class Engine:
         engine holds one per backend. Clearing the entry's own list is not
         enough — `torch.cuda.empty_cache()` would run while the engine still
         pinned every weight. Idempotent.
+
+        `_length_fn` MUST be reset with them. It is not a plain callable: the
+        factory passes `backends[0].length_fn`, a BOUND METHOD, so it carries
+        `backends[0]` — and therefore that device's entire model — on its
+        `__self__`. Clearing `_backends` alone left exactly one backend
+        reachable, always device 0's, which is why the production leak
+        showed the full model weight stranded on device 0 while every other
+        device came back clean.
         """
         self._backends = []
         self._backend_locks = []
         self._budgets = []
+        self._length_fn = len
         self._closed = True
 
     def token_count(self, texts: list[str]) -> int:
@@ -101,6 +110,12 @@ class Engine:
         Real tokens when the factory injected the tokenizer-based
         `length_fn`; characters with the default `len` (fakes, CPU tests).
         """
+        if self._closed:
+            # `close()` drops the injected `length_fn` along with the
+            # backends, so a closed engine would silently answer in
+            # characters instead of tokens. Raising is the same contract
+            # `embed` has, for the same reason.
+            raise RuntimeError("engine is closed: its model was evicted and its backends released")
         return sum(self._length_fn(text) for text in texts)
 
     def embed(self, texts: list[str]) -> np.ndarray:

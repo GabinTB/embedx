@@ -7,9 +7,11 @@ conflicts, eviction — runs on CPU CI.
 
 from __future__ import annotations
 
+import gc
 import logging
 import threading
 import time
+import weakref
 from typing import Any
 
 import numpy as np
@@ -94,10 +96,20 @@ class StubFactory:
         oom_on: set[int] | None = None,
         delay_s: float = 0.0,
         fail_with: Exception | None = None,
+        raise_on: dict[int, str] | None = None,
     ) -> None:
         self.oom_on = oom_on or set()
         self.delay_s = delay_s
         self.fail_with = fail_with
+        # device index -> message. Per-device, and NOT an OOM: `oom_on` is
+        # retried on the next device, this aborts the whole load. That
+        # difference is what makes partial placement observable.
+        #
+        # A message rather than an exception instance, so every call raises
+        # a FRESH one. Re-raising one object appends to its traceback each
+        # time and that traceback pins the frames — including the frames
+        # holding the backends a leak test is trying to weigh.
+        self.raise_on = raise_on or {}
         self.loads = 0  # backends constructed
         self.model_loads: list[str] = []  # one entry per load episode
         self.created: list[StubBackend] = []
@@ -120,6 +132,8 @@ class StubFactory:
             time.sleep(self.delay_s)
         if self.fail_with is not None:
             raise self.fail_with
+        if device_index in self.raise_on:
+            raise RuntimeError(self.raise_on[device_index])
         if device_index in self.oom_on:
             raise OutOfMemoryError(f"CUDA out of memory on {device_index}")
         with self._lock:
@@ -472,6 +486,185 @@ def test_idle_model_is_evicted_and_its_backends_torn_down() -> None:
 
     assert registry.list_loaded() == []
     assert all(backend.closed for backend in factory.created)
+
+
+# --------------------------------------------------------------------------- #
+# Eviction actually frees the backends (fix: release VRAM on eviction)
+# --------------------------------------------------------------------------- #
+#
+# `backend.closed` above says a teardown hook RAN. It says nothing about
+# whether the backend is still reachable, and that is the whole bug: on
+# 0.3.0 eviction called `empty_cache` while the engine's `length_fn` still
+# held backends[0] and this module's own release loop still held the last
+# one. The allocator only returns blocks nothing references, so it returned
+# nothing, silently — `/info` said no models and nvidia-smi said 7966 MiB.
+#
+# The GPU half of this regression lives in `tests/test_gpu.py` and measures
+# real bytes. These check the reference graph, which is the part that is
+# testable without a card and the part a refactor would quietly undo.
+
+
+class WatchingAccelerator:
+    """Accelerator double that snapshots reachability at `empty_cache`.
+
+    The timing is the assertion. Checking after `_evict` returns proves
+    nothing: the frames holding the leaked references die at that point
+    anyway, so the leak repairs itself just after the one moment it
+    mattered.
+    """
+
+    name = "watching"
+
+    def __init__(self) -> None:
+        self.watched: list[weakref.ref[Any]] = []
+        self.alive_at_empty_cache: list[int] = []
+        self.emptied: list[int] = []
+
+    def empty_cache(self, index: int) -> None:
+        self.emptied.append(index)
+        self.alive_at_empty_cache.append(sum(1 for ref in self.watched if ref() is not None))
+
+    def oom_error_types(self) -> tuple[type[BaseException], ...]:
+        return (OutOfMemoryError,)
+
+    def oom_error_names(self) -> tuple[str, ...]:
+        return ("OutOfMemoryError",)
+
+    # Unused by the registry, present to satisfy the Protocol.
+    def is_available(self) -> bool:
+        return True
+
+    def device_count(self) -> int:
+        return 2
+
+    def device_info(self, index: int) -> DeviceInfo:
+        return make_devices(2)[index]
+
+    def device_string(self, index: int) -> str:
+        return f"watched:{index}"
+
+    def supports_bfloat16(self, info: DeviceInfo) -> bool:
+        return True
+
+    def supports_float16(self, info: DeviceInfo) -> bool:
+        return True
+
+    def arch_score(self, info: DeviceInfo) -> float:
+        return 1.0
+
+
+def watching_registry(
+    factory: StubFactory | None = None, devices: int = 2
+) -> tuple[ModelRegistry, StubFactory, WatchingAccelerator]:
+    factory = factory or StubFactory()
+    accelerator = WatchingAccelerator()
+    registry = ModelRegistry(
+        make_devices(devices),
+        reaper_interval_s=0.01,
+        backend_factory=factory,
+        weight_file_lister=safetensors_listing,
+        accelerator=accelerator,
+    )
+    return registry, factory, accelerator
+
+
+def test_no_backend_is_reachable_when_eviction_empties_the_cache() -> None:
+    """The ordering the 0.3.0 leak got wrong, asserted at the exact moment.
+
+    `empty_cache` is the last useful instant: whatever is still reachable
+    then keeps its device memory, and nothing calls `empty_cache` again.
+    """
+    registry, factory, accelerator = watching_registry()
+    registry.get_or_load("org/model", pooling=Pooling.MEAN, keep_alive=0)
+    accelerator.watched = [weakref.ref(backend) for backend in factory.created]
+    assert len(accelerator.watched) == 2
+    # The factory keeps every backend it built, for the assertions the other
+    # tests make. Here it would be one more strong reference and would mask
+    # exactly what is being measured.
+    factory.created.clear()
+
+    assert registry._reap_once() == ["org/model"]
+
+    assert accelerator.emptied == [0, 1], "every device the model sat on must be emptied"
+    assert accelerator.alive_at_empty_cache == [0, 0], (
+        f"{max(accelerator.alive_at_empty_cache)} backend(s) were still reachable when "
+        "empty_cache ran; the allocator frees only what nothing references, so that "
+        "model's VRAM stays held with no error anywhere"
+    )
+
+
+def test_the_engine_stops_holding_backend_zero_through_its_length_fn() -> None:
+    """The bound method is the leak, and it always strands device 0.
+
+    `engine_from_backends` wires the engine to `backends[0].length_fn`.
+    That is not a plain function — it carries backends[0] on `__self__`,
+    so clearing `Engine._backends` leaves the first device's model fully
+    reachable and every other device's freed. Device 0 holding the whole
+    model while device 1 held only its CUDA context is exactly how this
+    was reported.
+    """
+    registry, factory, _ = watching_registry()
+    engine = registry.get_or_load("org/model", pooling=Pooling.MEAN, keep_alive=0)
+    first = weakref.ref(factory.created[0])
+    assert engine._length_fn.__self__ is first(), "the premise: it is a bound method"  # type: ignore[attr-defined]
+    factory.created.clear()  # else the factory itself keeps them alive
+
+    assert registry._reap_once() == ["org/model"]
+    # `engine` is still held HERE, which is the realistic case: a request
+    # handler holding its engine must not pin a model past eviction.
+    gc.collect()
+    assert first() is None, "the engine is still holding device 0's backend"
+
+
+def test_a_failed_load_releases_the_devices_that_had_already_succeeded() -> None:
+    """The partial-placement leak: worse than eviction, because it retries.
+
+    Device 0 takes the model, device 1 raises something that is not an
+    OOM, so the load fails outright. Device 0's copy is referenced only by
+    a local of the frame that is unwinding, and no caller ever sees it —
+    so without an explicit release each retry strands one more model.
+    """
+    registry, factory, accelerator = watching_registry()
+    factory.raise_on = {1: "device 1 fell over mid-load"}
+
+    with pytest.raises(RuntimeError, match="fell over mid-load"):
+        registry.get_or_load("org/model", pooling=Pooling.MEAN)
+
+    assert registry.list_loaded() == []
+    assert len(factory.created) == 1, "device 0 did load a backend"
+    assert factory.created[0].closed, "device 0's backend was never torn down"
+    assert accelerator.emptied == [0], "device 0's memory was never asked back"
+
+
+def test_repeated_failed_loads_do_not_accumulate_backends() -> None:
+    """What a client retry loop does to a card that leaks on failure.
+
+    Every attempt must reclaim device 0 within the attempt. Deferring to
+    whenever the garbage collector next runs is what makes this the worst
+    of the leaks: nothing bounds how many models pile up in between.
+    """
+    registry, factory, accelerator = watching_registry()
+    factory.raise_on = {1: "still down"}
+    refs: list[weakref.ref[Any]] = []
+
+    for attempt in range(5):
+        with pytest.raises(RuntimeError, match="still down"):
+            registry.get_or_load(f"org/model-{attempt}", pooling=Pooling.MEAN)
+        # Watched from the NEXT attempt onwards: the point is that attempt
+        # N+1 finds nothing left over from attempt N.
+        fresh = [weakref.ref(backend) for backend in factory.created]
+        accelerator.watched.extend(fresh)
+        refs.extend(fresh)
+        factory.created.clear()  # else the factory itself keeps them alive
+
+    assert accelerator.emptied == [0] * 5, "each failed attempt must reclaim device 0"
+    assert accelerator.alive_at_empty_cache[1:] == [0, 0, 0, 0], (
+        f"backends from earlier attempts were still reachable: {accelerator.alive_at_empty_cache}"
+    )
+    gc.collect()
+    assert [ref() for ref in refs] == [None] * len(refs), (
+        "a failed load left a backend alive; five retries would be five models"
+    )
 
 
 def test_model_within_its_keep_alive_survives() -> None:
