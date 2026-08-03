@@ -18,8 +18,8 @@ embedx replicates the model on every device, shards the *inputs* at runtime,
 and lets the fast card come back for more until the work runs out.
 
 [![CI](https://github.com/GabinTB/embedx/actions/workflows/ci.yml/badge.svg)](https://github.com/GabinTB/embedx/actions/workflows/ci.yml)
-[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
-[![Python 3.11 | 3.12](https://img.shields.io/badge/python-3.11%20%7C%203.12-blue.svg)](pyproject.toml)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://github.com/GabinTB/embedx/blob/main/LICENSE)
+[![Python 3.11 | 3.12](https://img.shields.io/badge/python-3.11%20%7C%203.12-blue.svg)](https://github.com/GabinTB/embedx/blob/main/pyproject.toml)
 
 ---
 
@@ -43,7 +43,7 @@ that combination is what the image ships and tests together.
 ### The server (Docker — the verified path)
 
 Needs an NVIDIA driver **525+** and the [NVIDIA Container
-Toolkit](DEPLOY.md#prerequisites).
+Toolkit](https://github.com/GabinTB/embedx/blob/main/DEPLOY.md#prerequisites).
 
 ```bash
 git clone https://github.com/GabinTB/embedx && cd embedx
@@ -59,11 +59,11 @@ The identical image is published to two registries:
 
 | registry | pull | notes |
 |---|---|---|
-| **Docker Hub** | `docker pull gabintb/embedx:0.3.0` | Default. **Anonymous pulls are rate-limited** by Docker. |
-| **GHCR** | `docker pull ghcr.io/gabintb/embedx:0.3.0` | Same bytes, **no anonymous pull rate limit**. |
+| **Docker Hub** | `docker pull gabintb/embedx:0.3.1` | Default. **Anonymous pulls are rate-limited** by Docker. |
+| **GHCR** | `docker pull ghcr.io/gabintb/embedx:0.3.1` | Same bytes, **no anonymous pull rate limit**. |
 
 If you hit Docker Hub's limit — likely on shared CI egress, unlikely on a
-workstation — set `EMBEDX_IMAGE=ghcr.io/gabintb/embedx:0.3.0` in `.env` and
+workstation — set `EMBEDX_IMAGE=ghcr.io/gabintb/embedx:0.3.1` in `.env` and
 compose will pull from GHCR instead.
 
 If you are modifying source, build the image rather than pulling it — same
@@ -105,7 +105,7 @@ Sending a *different* one returns **409** rather than silently reloading or
 ignoring you.
 
 To run the server without Docker, install from source with the build flag —
-see [DEPLOY.md](DEPLOY.md#install):
+see [DEPLOY.md](https://github.com/GabinTB/embedx/blob/main/DEPLOY.md#install):
 
 ```bash
 EMBEDX_BUILD_SERVER=1 uv pip install \
@@ -184,9 +184,9 @@ partitioned up front, so nothing has to be predicted. The split is an
 ## Measured results
 
 Every figure below is transcribed from
-[`dev/output/results.json`](dev/output/results.json) and
-[`dev/output/model_load_results.json`](dev/output/model_load_results.json),
-which the notebooks in [`dev/`](dev/) write. Nothing here was retyped out of a
+[`dev/output/results.json`](https://github.com/GabinTB/embedx/blob/main/dev/output/results.json) and
+[`dev/output/model_load_results.json`](https://github.com/GabinTB/embedx/blob/main/dev/output/model_load_results.json),
+which the notebooks in [`dev/`](https://github.com/GabinTB/embedx/tree/main/dev) write. Nothing here was retyped out of a
 cell, and a number that is not in those files was not measured.
 
 **Hardware:** NVIDIA RTX PRO 2000 Blackwell (16 GB, cc 12.0) + NVIDIA RTX A400
@@ -194,7 +194,7 @@ cell, and a number that is not in those files was not measured.
 
 ### Two GPUs of different speed
 
-From [`dev/03_real_gpu_throughput.ipynb`](dev/03_real_gpu_throughput.ipynb).
+From [`dev/03_real_gpu_throughput.ipynb`](https://github.com/GabinTB/embedx/blob/main/dev/03_real_gpu_throughput.ipynb).
 8,000 real `fancyzhx/ag_news` texts, 442,423 MiniLM tokens, mean pooling,
 bfloat16, `max_batch_tokens=16384`. Medians of 5 timed runs after 2 discarded
 warmups, with correctness asserted *before* any timing: 256/256 probe rows in
@@ -246,7 +246,7 @@ is an override you will probably never need rather than a knob you must tune.
 
 ### Padding waste
 
-From [`dev/02_padding_savings.ipynb`](dev/02_padding_savings.ipynb),
+From [`dev/02_padding_savings.ipynb`](https://github.com/GabinTB/embedx/blob/main/dev/02_padding_savings.ipynb),
 `fancyzhx/ag_news` train[:2000] — 112,980 real tokens, median 53, p95 102.
 Waste is the fraction of compute spent embedding padding.
 
@@ -268,7 +268,7 @@ long document in a batch of its own and the waste goes to **0%**.
 
 ### What a cold model load actually costs
 
-From [`dev/04_model_load_latency.ipynb`](dev/04_model_load_latency.ipynb).
+From [`dev/04_model_load_latency.ipynb`](https://github.com/GabinTB/embedx/blob/main/dev/04_model_load_latency.ipynb).
 Medians, each run in a fresh process with the checkpoint's page cache
 verifiably evicted. For Qwen3-Embedding-4B (7.49 GiB) on the Blackwell card:
 
@@ -405,7 +405,7 @@ Two supported paths, both single-host: **Docker** when you want the dependency
 stack solved for you, **systemd** when the host already has the right Python
 and toolchain and you would rather not run a 12 GB image.
 
-[**DEPLOY.md**](DEPLOY.md) covers both end to end: prerequisites, the cache
+[**DEPLOY.md**](https://github.com/GabinTB/embedx/blob/main/DEPLOY.md) covers both end to end: prerequisites, the cache
 volumes (which are the part that actually affects performance), the systemd
 unit, API keys and network binding, GPU selection, running alongside Ollama,
 and a troubleshooting section for the failures this project actually hit.
@@ -482,4 +482,4 @@ not both build it.
 
 ## License
 
-Apache-2.0 — see [LICENSE](LICENSE). Copyright 2026 Gabin Taibi.
+Apache-2.0 — see [LICENSE](https://github.com/GabinTB/embedx/blob/main/LICENSE). Copyright 2026 Gabin Taibi.

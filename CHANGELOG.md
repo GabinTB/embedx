@@ -6,33 +6,73 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-08-04
+
+**Bug fix release. No API change, no configuration change, no migration.**
+Every 0.3.0 call, flag and environment variable behaves identically.
+
+**Who is affected: anyone who ran 0.3.0 long enough to evict a model.** An
+evicted model's VRAM was never handed back, so a server accumulated the dead
+weight of every model it had ever loaded and released. `/info` correctly
+reported no resident models while `nvidia-smi` reported the memory still held
+by the process, indefinitely, with nothing in the log to connect the two. The
+consequences arrive later and look unrelated to eviction: a subsequent load
+OOMs on a box with apparently free memory, or it fits on fewer devices than
+the hardware allows and is then served — quietly, and at lower throughput —
+from a subset of the GPUs. A restart was the only recovery.
+
 ### Fixed
 
-- **Evicting a model now actually returns its VRAM.** On 0.3.0 an evicted
-  model left its full weight on the card indefinitely: `/info` reported no
-  models while `nvidia-smi` reported 7966 MiB still held by the server
-  process, with nothing in the log. `empty_cache()` returns only blocks the
-  allocator already considers free, and four things stopped the weights from
-  being free at the moment it ran — `HFBackend` had no `close()` at all;
-  `Engine.close()` cleared its backend list but not `_length_fn`, which is a
-  *bound method* of `backends[0]` and therefore carried device 0's entire
-  model (hence the report's device 0 holding the model while device 1 held
-  only its CUDA context); the release loop's own `for` variable kept the last
-  backend alive in a live frame; and a loaded transformer is cyclic, so
-  reference counting could not collect it even once nothing referenced it.
-  Measured on this repo's benchmark model: dropping every reference freed 0
-  bytes, and the added `gc.collect()` freed all 43.9 MiB.
+- **Evicting a model now releases its device memory.** `empty_cache()` returns
+  only blocks the allocator already considers free, so the whole question is
+  what is still reachable when it runs. **Four independent causes**, each on
+  its own sufficient to strand a full model copy — which is why this needed
+  four fixes and not one:
+
+  1. **`HFBackend` had no `close()` at all.** The teardown loop does
+     `getattr(backend, "close", None)` and found nothing, so against a real
+     backend it was a no-op. The eviction tests passed because `StubBackend`
+     *does* have one, and a stub holds no tensors, so a correct release and a
+     broken one are indistinguishable through it.
+  2. **`Engine.close()` cleared `_backends` but not `_length_fn`.** The
+     factory sets that to `backends[0].length_fn` — a *bound method*, which
+     carries `backends[0]` on `__self__` and therefore that device's entire
+     model. This is why device 0 held the full weight while every other device
+     came back holding only its CUDA context.
+  3. **A `for` loop variable in `_release_backends` outlived the list.**
+     Python leaves the loop's last value bound, and that frame is still alive
+     when `empty_cache` runs a few lines later.
+  4. **A loaded transformer is cyclic.** Reference counting cannot collect a
+     cycle, so even with every reference dropped the weights remained as
+     uncollected garbage that `empty_cache` walked straight past. An explicit
+     `gc.collect()` before `empty_cache` is what actually frees them —
+     measured on this repo's own benchmark model, dropping every reference
+     freed **0 bytes** and the collection then freed all **43.9 MiB**.
+
 - **A load that fails after placing the model on some devices now releases
-  them.** Previously the copies already on the card were reachable only from
-  the unwinding frame, so a client retry loop consumed a model's worth of VRAM
-  per attempt. All of placement is now covered by one release path — an OOM,
-  a failed smoke test and any other constructor failure give the memory back
-  by the same route. On the OOM path the exception's traceback is dropped
-  before `empty_cache`, because it pins the frame holding the half-built
-  model.
+  them.** Copies already on the card were reachable only from the unwinding
+  frame, so nothing downstream ever saw them to free them and a retrying
+  client consumed a model's worth of VRAM per attempt. All of placement is now
+  covered by one release path — an OOM, a failed smoke test, or any other
+  constructor failure gives the memory back by the same route. On the OOM path
+  the exception's traceback is dropped before `empty_cache`, because it pins
+  the frame holding the half-built model.
 - `Engine.token_count()` now raises on a closed engine instead of silently
   answering in characters, since `close()` drops the injected token-length
   function along with the backends.
+
+### Added
+
+- `tests/test_registry_gpu.py`: gpu-marked regression tests that measure real
+  bytes, asserting `memory_reserved` as well as `memory_allocated` because it
+  is *reserved* that `nvidia-smi` shows. Baselines are taken after a warm
+  cycle so torch's one-off per-device cuBLAS workspace is not mistaken for a
+  leak, and tolerances scale to the model's own measured size rather than to a
+  fixed byte count. All three fail on 0.3.0.
+- CPU tests in `tests/test_registry.py` that snapshot reachability *at* the
+  moment `empty_cache` is called. Checking afterwards proves nothing: the
+  frames holding the leaked references die at that point anyway, so the leak
+  repairs itself just after the one instant it mattered.
 
 ## [0.3.0] - 2026-08-02
 

@@ -83,8 +83,8 @@ to both:
 
 | registry | pull | notes |
 |---|---|---|
-| **Docker Hub** (default) | `docker pull gabintb/embedx:0.3.0` | Shorter name. Docker applies **anonymous pull rate limits**, counted per source IP. |
-| **GHCR** | `docker pull ghcr.io/gabintb/embedx:0.3.0` | Identical bytes. **No anonymous pull rate limit.** |
+| **Docker Hub** (default) | `docker pull gabintb/embedx:0.3.1` | Shorter name. Docker applies **anonymous pull rate limits**, counted per source IP. |
+| **GHCR** | `docker pull ghcr.io/gabintb/embedx:0.3.1` | Identical bytes. **No anonymous pull rate limit.** |
 
 Compose uses Docker Hub unless you say otherwise. To switch — worth doing on a
 build host behind shared NAT, or in CI, where the rate limit is counted
@@ -92,7 +92,7 @@ against everyone sharing your egress IP:
 
 ```bash
 # in .env
-EMBEDX_IMAGE=ghcr.io/gabintb/embedx:0.3.0
+EMBEDX_IMAGE=ghcr.io/gabintb/embedx:0.3.1
 ```
 
 Expect **12 GB** either way, and **~5 minutes** if you are building. That size
